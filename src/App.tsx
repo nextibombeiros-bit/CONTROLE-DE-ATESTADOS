@@ -1,21 +1,29 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CalendarDays,
   CheckCircle2,
   Eye,
   Loader2,
-  RefreshCw,
   Search,
   ShieldAlert,
 } from "lucide-react";
-import { supabase, hasSupabaseConfig } from "./lib/supabase";
-import { buildControle } from "./lib/controle";
-import { formatDateBR, periodLabel, startDateForPreset, todayInputValue } from "./lib/date";
-import { statusLabels } from "./lib/status";
-import type { Atestado, ControleLinha, Sincronizacao, StatusKey } from "./types";
+import { supabase, hasSupabaseConfig } from "@/lib/supabase.ts";
+import { buildControle } from "@/lib/controle.ts";
+import {
+  formatDateBR,
+  formatDateTimeBR,
+  periodLabel,
+  startDateForPreset,
+  todayInputValue,
+} from "@/lib/date.ts";
+import { statusLabels } from "@/lib/status.ts";
+import type { Atestado, ControleLinha, Sincronizacao, StatusKey } from "@/types.ts";
 
 type PeriodMode = "30" | "60" | "90" | "manual";
+
+const AUTO_SYNC_STALE_MS = 10 * 60 * 1000;
+const AUTO_SYNC_COOLDOWN_MS = 60 * 1000;
 
 const summaryConfig: Array<{ key: StatusKey; label: string; icon: typeof AlertTriangle }> = [
   { key: "alerta", label: "Alerta 16+", icon: ShieldAlert },
@@ -35,6 +43,8 @@ function App() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<ControleLinha | null>(null);
+  const reloadTimerRef = useRef<number | null>(null);
+  const lastAutoSyncRequestRef = useRef(0);
 
   useEffect(() => {
     if (periodMode === "manual") return;
@@ -43,10 +53,120 @@ function App() {
     setEndDate(todayInputValue());
   }, [periodMode]);
 
+  async function loadData() {
+    if (!supabase) return;
+    setLoading(true);
+    setError("");
+
+    const [{ data: atestadosData, error: atestadosError }, { data: syncData, error: syncError }] = await Promise.all([
+      supabase
+        .from("atestados")
+        .select("*, colaboradores!inner(*)")
+        .eq("removido", false)
+        .eq("eh_atestado_medico", true)
+        .eq("colaboradores.ativo", true)
+        .lte("data_inicio", endDate)
+        .gte("data_fim", startDate)
+        .order("data_inicio", { ascending: false }),
+      supabase
+        .from("sincronizacoes")
+        .select("*")
+        .order("iniciado_em", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ]);
+
+    if (atestadosError) {
+      setError(atestadosError.message);
+    } else if (syncError) {
+      setError(syncError.message);
+    } else {
+      const latestSync = (syncData as Sincronizacao | null) ?? null;
+      setAtestados((atestadosData ?? []) as Atestado[]);
+      setSyncLog(latestSync);
+      if (latestSync?.status === "erro" && latestSync.erro) {
+        setError(`Falha na ultima sincronizacao automatica: ${latestSync.erro}`);
+      }
+    }
+
+    setLoading(false);
+  }
+
+  async function syncNexti() {
+    if (!supabase) return;
+    setSyncing(true);
+    setError("");
+
+    const { error: syncError } = await supabase.functions.invoke("sync-nexti", {
+      body: {
+        automatic: true,
+      },
+    });
+
+    if (syncError) {
+      setError(syncError.message);
+    } else {
+      await loadData();
+    }
+
+    setSyncing(false);
+  }
+
   useEffect(() => {
     if (!supabase) return;
     void loadData();
   }, [startDate, endDate]);
+
+  useEffect(() => {
+    const client = supabase;
+    if (!client) return;
+
+    const scheduleReload = () => {
+      if (reloadTimerRef.current) {
+        window.clearTimeout(reloadTimerRef.current);
+      }
+
+      reloadTimerRef.current = window.setTimeout(() => {
+        void loadData();
+      }, 800);
+    };
+
+    const channel = client
+      .channel("controle-atestados-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "atestados" }, scheduleReload)
+      .on("postgres_changes", { event: "*", schema: "public", table: "colaboradores" }, scheduleReload)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sincronizacoes" }, scheduleReload)
+      .subscribe();
+
+    const intervalId = window.setInterval(() => {
+      void loadData();
+    }, 60_000);
+
+    return () => {
+      window.clearInterval(intervalId);
+      if (reloadTimerRef.current) {
+        window.clearTimeout(reloadTimerRef.current);
+      }
+      void client.removeChannel(channel);
+    };
+  }, [startDate, endDate]);
+
+  useEffect(() => {
+    if (!supabase || syncing) return;
+
+    const latestSyncReference = syncLog?.finalizado_em ?? syncLog?.iniciado_em ?? null;
+    const ageMs = latestSyncReference
+      ? Date.now() - new Date(latestSyncReference).getTime()
+      : Number.POSITIVE_INFINITY;
+    const cooldownElapsed = Date.now() - lastAutoSyncRequestRef.current > AUTO_SYNC_COOLDOWN_MS;
+
+    if (!cooldownElapsed) return;
+
+    if (!syncLog || (syncLog.status !== "em_execucao" && ageMs > AUTO_SYNC_STALE_MS)) {
+      lastAutoSyncRequestRef.current = Date.now();
+      void syncNexti();
+    }
+  }, [syncLog, syncing]);
 
   const controle = useMemo(() => buildControle(atestados, startDate, endDate), [atestados, startDate, endDate]);
 
@@ -68,57 +188,12 @@ function App() {
     };
   }, [controle]);
 
-  async function loadData() {
-    if (!supabase) return;
-    setLoading(true);
-    setError("");
-
-    const [{ data: atestadosData, error: atestadosError }, { data: syncData }] = await Promise.all([
-      supabase
-        .from("atestados")
-        .select("*, colaboradores(*)")
-        .eq("removido", false)
-        .lte("data_inicio", endDate)
-        .gte("data_fim", startDate)
-        .order("data_inicio", { ascending: false }),
-      supabase
-        .from("sincronizacoes")
-        .select("*")
-        .order("iniciado_em", { ascending: false })
-        .limit(1)
-        .maybeSingle(),
-    ]);
-
-    if (atestadosError) {
-      setError(atestadosError.message);
-    } else {
-      setAtestados((atestadosData ?? []) as Atestado[]);
-      setSyncLog((syncData as Sincronizacao | null) ?? null);
-    }
-
-    setLoading(false);
-  }
-
-  async function syncNexti() {
-    if (!supabase) return;
-    setSyncing(true);
-    setError("");
-
-    const { error: syncError } = await supabase.functions.invoke("sync-nexti", {
-      body: {
-        startLastUpdate: `${startDate}T00:00:00`,
-        finishLastUpdate: `${endDate}T23:59:59`,
-      },
-    });
-
-    if (syncError) {
-      setError(syncError.message);
-    } else {
-      await loadData();
-    }
-
-    setSyncing(false);
-  }
+  const historicoSelecionado = useMemo(() => {
+    if (!selected) return [];
+    return [...selected.atestados].sort(
+      (a, b) => b.data_inicio.localeCompare(a.data_inicio) || b.id_nexti - a.id_nexti,
+    );
+  }, [selected]);
 
   if (!hasSupabaseConfig) {
     return (
@@ -138,12 +213,18 @@ function App() {
         <div>
           <p className="eyebrow">RH / DP</p>
           <h1>Controle de Atestados</h1>
+          <p className="muted">Espelho automatico dos atestados medicos da Nexti, sem ferias, faltas e desligados.</p>
         </div>
         <div className="topbar-actions">
-          <button className="icon-button" type="button" onClick={syncNexti} disabled={syncing} title="Sincronizar Nexti">
-            {syncing ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
-            Sincronizar
-          </button>
+          <div className={`sync-pill ${syncing ? "running" : ""}`}>
+            {syncing ? <Loader2 className="spin" size={16} /> : <ShieldAlert size={16} />}
+            {syncing ? "Atualizando automaticamente" : "Atualizacao automatica ativa"}
+          </div>
+          <p className="muted sync-caption">
+            {syncLog
+              ? `Ultima sincronizacao: ${formatDateTimeBR(syncLog.finalizado_em ?? syncLog.iniciado_em)}`
+              : "Aguardando primeira sincronizacao automatica"}
+          </p>
         </div>
       </header>
 
@@ -191,7 +272,11 @@ function App() {
         </label>
         <label className="search-field">
           <Search size={16} />
-          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar" />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Buscar matricula, nome, cargo ou posto"
+          />
         </label>
       </section>
 
@@ -199,7 +284,7 @@ function App() {
 
       <section className="summary-grid">
         <article className="summary-card">
-          <span>Total no periodo</span>
+          <span>Total com atestado medico</span>
           <strong>{totals.colaboradores}</strong>
           <small>{periodLabel(startDate, endDate)}</small>
         </article>
@@ -218,7 +303,7 @@ function App() {
             <h2>Controle</h2>
             <p>
               {loading ? "Carregando dados..." : `${filteredControle.length} colaboradores encontrados`}
-              {syncLog ? ` | Ultima sincronizacao: ${formatDateBR(syncLog.iniciado_em)}` : ""}
+              {syncLog ? ` | Atualizado em: ${formatDateTimeBR(syncLog.finalizado_em ?? syncLog.iniciado_em)}` : ""}
             </p>
           </div>
         </div>
@@ -236,7 +321,6 @@ function App() {
                 <th>Primeiro</th>
                 <th>Ultimo</th>
                 <th>Periodo</th>
-                <th aria-label="Historico"></th>
               </tr>
             </thead>
             <tbody>
@@ -247,23 +331,23 @@ function App() {
                   </td>
                   <td className="days">{line.totalDias}</td>
                   <td>{line.matricula}</td>
-                  <td>{line.colaborador}</td>
+                  <td>
+                    <button className="colaborador-link" type="button" onClick={() => setSelected(line)}>
+                      <span>{line.colaborador}</span>
+                      <Eye size={14} />
+                    </button>
+                  </td>
                   <td>{line.cargo}</td>
                   <td>{line.posto}</td>
                   <td>{formatDateBR(line.primeiroAtestado)}</td>
                   <td>{formatDateBR(line.ultimoAtestado)}</td>
                   <td>{line.periodo}</td>
-                  <td>
-                    <button className="table-action" type="button" onClick={() => setSelected(line)} title="Ver historico">
-                      <Eye size={16} />
-                    </button>
-                  </td>
                 </tr>
               ))}
               {!loading && filteredControle.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="empty-state">
-                    Nenhum atestado encontrado no periodo.
+                  <td colSpan={9} className="empty-state">
+                    Nenhum atestado medico encontrado no periodo.
                   </td>
                 </tr>
               ) : null}
@@ -279,6 +363,9 @@ function App() {
               <div>
                 <p className="eyebrow">{selected.matricula}</p>
                 <h2>{selected.colaborador}</h2>
+                <p className="muted">
+                  {selected.cargo} | {selected.posto}
+                </p>
               </div>
               <button className="icon-only" type="button" onClick={() => setSelected(null)} aria-label="Fechar">
                 x
@@ -294,21 +381,23 @@ function App() {
                     <th>Lancamento</th>
                     <th>Lancado por</th>
                     <th>CID</th>
+                    <th>Medico</th>
                     <th>Tipo</th>
                     <th>ID Nexti</th>
                     <th>Observacao</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {selected.atestados.map((item) => (
+                  {historicoSelecionado.map((item) => (
                     <tr key={item.id}>
                       <td>{formatDateBR(item.data_inicio)}</td>
                       <td>{formatDateBR(item.data_fim)}</td>
                       <td className="days">{item.dias}</td>
-                      <td>{formatDateBR(item.data_lancamento)}</td>
-                      <td>{item.lancado_por ?? "-"}</td>
+                      <td>{formatDateTimeBR(item.data_lancamento)}</td>
+                      <td>{item.lancado_por_nome ?? item.lancado_por ?? "-"}</td>
                       <td>{item.cid ?? "-"}</td>
-                      <td>{item.tipo_ausencia_id ?? item.tipo_ausencia_external_id ?? "-"}</td>
+                      <td>{item.medico ?? "-"}</td>
+                      <td>{item.tipo_ausencia_nome ?? item.tipo_ausencia_id ?? item.tipo_ausencia_external_id ?? "-"}</td>
                       <td>{item.id_nexti}</td>
                       <td>{item.observacao ?? "-"}</td>
                     </tr>

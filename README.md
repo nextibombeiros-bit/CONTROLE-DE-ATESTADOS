@@ -2,6 +2,8 @@
 
 Aplicacao para acompanhar colaboradores com 16 dias ou mais de atestados medicos dentro de um periodo movel, usando React/Vite, Supabase e sincronizacao com a API Nexti via Supabase Edge Function.
 
+O sistema agora considera apenas atestados medicos, exclui colaboradores desligados do painel e mantem o frontend em atualizacao automatica com sincronizacao recorrente no Supabase.
+
 ## Escopo Nexti
 
 Este sistema e apenas de consulta e controle. A integracao com a Nexti nao cria, altera nem exclui lancamentos na Nexti.
@@ -9,7 +11,10 @@ Este sistema e apenas de consulta e controle. A integracao com a Nexti nao cria,
 A Edge Function usa `POST` somente para obter token OAuth em `/security/oauth/token`, com `Authorization: Basic` e `grant_type=client_credentials`. Depois disso, a Nexti e acessada apenas por consultas `GET` nos endpoints permitidos:
 
 - `/absences/lastupdate/start/{start}/finish/{finish}`
+- `/absencesituations/all`
 - `/persons/{id}`
+- `/persons/all`
+- `/useraccounts/startdate/{startDate}/finishdate/{finishDate}`
 
 Qualquer outro caminho da API Nexti e bloqueado pela propria funcao.
 
@@ -29,7 +34,7 @@ O arquivo local `prompt controle de atestados` foi colocado no `.gitignore` porq
 ## Configuracao do Supabase
 
 1. Crie ou abra o projeto no Supabase.
-2. Rode o SQL de `supabase/migrations/20260429180000_init.sql` no SQL Editor.
+2. Aplique todas as migrations da pasta `supabase/migrations/` no projeto.
 3. Publique a Edge Function:
 
 ```bash
@@ -57,7 +62,19 @@ Ou, se a sua Nexti usa IDs externos:
 supabase secrets set NEXTI_MEDICAL_ABSENCE_SITUATION_EXTERNAL_IDS="ATESTADO_MEDICO"
 ```
 
-Se esses filtros ficarem vazios, a sincronizacao importara todas as ausencias retornadas pela Nexti.
+Se esses filtros ficarem vazios, a funcao tentara identificar automaticamente apenas as situacoes medicas pela configuracao da propria Nexti.
+
+O comportamento recomendado e deixar a funcao identificar automaticamente situacoes medicas pela propria configuracao da Nexti (`cid`, `medicalDoctor` e nome da situacao). Se o seu ambiente usar nomes ou flags fora do padrao, preencha os filtros acima para forcar somente os IDs corretos.
+
+Voce tambem pode ajustar a janela automatica:
+
+```bash
+supabase secrets set NEXTI_SYNC_INITIAL_LOOKBACK_DAYS="365"
+supabase secrets set NEXTI_SYNC_OVERLAP_MINUTES="15"
+```
+
+- `NEXTI_SYNC_INITIAL_LOOKBACK_DAYS`: periodo usado na primeira sincronizacao automatica, quando ainda nao existe historico de execucao.
+- `NEXTI_SYNC_OVERLAP_MINUTES`: folga de seguranca para nao perder atualizacoes entre uma execucao e outra.
 
 ## Configuracao do frontend
 
@@ -77,9 +94,11 @@ VITE_SUPABASE_ANON_KEY=sua_chave_anon_publica
 Rode localmente:
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
+
+O arquivo `.env` e opcional neste projeto. Se ele nao existir, o frontend usa o fallback publico ja configurado em `src/lib/supabase.ts`. So crie `.env` se quiser apontar para outro projeto Supabase.
 
 As CLIs necessarias ficam instaladas no proprio projeto. Use os scripts abaixo:
 
@@ -90,6 +109,54 @@ npm run supabase:login
 npm run supabase:link
 npm run supabase:db:push
 npm run supabase:functions:deploy
+```
+
+Depois de aplicar as migrations e publicar a function, a sincronizacao passa a rodar automaticamente a cada 5 minutos via `pg_cron` + `pg_net` no proprio Supabase.
+
+## Operacao local no Windows (PowerShell)
+
+Se voce quiser operar este repositorio diretamente do Windows, sem depender do Codespaces:
+
+1. Abra PowerShell na raiz do projeto.
+2. Rode o setup local:
+
+```powershell
+.\scripts\setup_local.ps1
+```
+
+Esse script:
+
+- garante que `origin` aponta para o repositorio certo;
+- configura o Git Credential Manager do Windows;
+- instala as dependencias do projeto com `npm ci`.
+
+Depois disso, o fluxo diario fica:
+
+```powershell
+git pull
+npm run dev
+git status
+.\scripts\connect_git_and_push.ps1 -CommitMessage "ajuste no dashboard"
+```
+
+Na primeira autenticacao com o GitHub, use o login do navegador ou um PAT valido quando o Git pedir credenciais. Evite gravar token fixo no `origin`.
+
+## Operacao no Codespaces ou Linux
+
+Para manter o mesmo fluxo em shell Unix, o repositorio agora inclui:
+
+```bash
+chmod +x scripts/connect_git_and_push.sh
+./scripts/connect_git_and_push.sh
+```
+
+Se quiser forcar push com token temporario no ambiente, exporte:
+
+```bash
+export GITHUB_REPO_URL="https://github.com/nextibombeiros-bit/CONTROLE-DE-ATESTADOS.git"
+export GITHUB_USERNAME="nextibombeiros-bit"
+export GITHUB_TOKEN="SEU_PAT_VALIDO"
+./scripts/connect_git_and_push.sh
 ```
 
 ## Publicacao no GitHub Pages
@@ -107,8 +174,9 @@ Depois ative Pages usando GitHub Actions. O workflow gera o build com base `/CON
 
 1. Acesse o site.
 2. Escolha o periodo: 30, 60, 90 dias ou intervalo manual.
-3. Clique em sincronizar para buscar dados da Nexti por `lastUpdate`.
-4. A tabela mostra uma linha por colaborador, ordenada pelo maior total de dias.
+3. Aguarde a sincronizacao automatica da Nexti. Nao e necessario clicar em botao manual.
+4. A tabela mostra uma linha por colaborador, ordenada pelo maior total de dias distintos no periodo.
+5. Clique no nome do colaborador para abrir o historico detalhado de cada atestado.
 
 O acesso ao dashboard esta sem login. As policies do Supabase permitem leitura publica das tabelas usadas pela tela.
 

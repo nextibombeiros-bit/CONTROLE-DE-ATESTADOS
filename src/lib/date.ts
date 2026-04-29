@@ -29,6 +29,17 @@ export function formatDateBR(value: string | null | undefined): string {
   return `${day}/${month}/${year}`;
 }
 
+export function formatDateTimeBR(value: string | null | undefined): string {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(parsed);
+}
+
 export function daysBetweenInclusive(start: string, end: string): number {
   const startDate = new Date(`${start}T00:00:00`);
   const endDate = new Date(`${end}T00:00:00`);

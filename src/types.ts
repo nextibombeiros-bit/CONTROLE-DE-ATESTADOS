@@ -10,6 +10,9 @@ export type Colaborador = {
   empresa: string | null;
   situacao: string | null;
   ultima_atualizacao: string | null;
+  ativo: boolean;
+  data_desligamento: string | null;
+  user_account_id_nexti: number | null;
 };
 
 export type Atestado = {
@@ -26,7 +29,12 @@ export type Atestado = {
   observacao: string | null;
   tipo_ausencia_id: number | null;
   tipo_ausencia_external_id: string | null;
+  tipo_ausencia_nome: string | null;
+  eh_atestado_medico: boolean;
   removido: boolean;
+  lancado_por_id: number | null;
+  lancado_por_nome: string | null;
+  medico: string | null;
   colaboradores?: Colaborador | null;
 };
 
@@ -54,4 +62,8 @@ export type Sincronizacao = {
   quantidade_importada: number;
   quantidade_atualizada: number;
   erro: string | null;
+  detalhes?: {
+    automatic?: boolean;
+    [key: string]: unknown;
+  } | null;
 };

@@ -1,4 +1,4 @@
-import type { StatusKey } from "../types";
+import type { StatusKey } from "@/types.ts";
 
 export function statusForDays(days: number): StatusKey {
   if (days >= 16) return "alerta";
