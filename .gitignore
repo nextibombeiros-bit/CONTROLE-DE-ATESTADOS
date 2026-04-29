@@ -1,0 +1,19 @@
+.DS_Store
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+vite.config.js
+vite.config.d.ts
+
+# Arquivos locais com segredos ou anotações operacionais.
+prompt controle de atestados
+prompt atestado.txt
+.codex
+
+# Supabase local runtime
+supabase/.branches/
+supabase/.temp/

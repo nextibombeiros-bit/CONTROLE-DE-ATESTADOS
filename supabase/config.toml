@@ -1,0 +1,4 @@
+project_id = "controle-de-atestados"
+
+[functions.sync-nexti]
+verify_jwt = false
