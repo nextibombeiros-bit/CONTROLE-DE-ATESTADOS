@@ -40,6 +40,7 @@ const corsHeaders = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const ALLOWED_NEXTI_READ_PATHS = ["/absences/lastupdate/", "/persons/"];
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") {
@@ -96,7 +97,10 @@ Deno.serve(async (request) => {
 
       while (page < totalPages) {
         const path = `/absences/lastupdate/start/${formatNextiDate(chunk.start)}/finish/${formatNextiDate(chunk.finish)}`;
-        const payload = await fetchNexti(nextiBaseUrl, path, token, { page: String(page), size: String(pageSize) });
+        const payload = await fetchNextiReadOnly(nextiBaseUrl, path, token, {
+          page: String(page),
+          size: String(pageSize),
+        });
         const absences = extractContent<NextiAbsence>(payload);
         totalPages = Number(payload.totalPages ?? payload.value?.totalPages ?? 1);
 
@@ -250,12 +254,16 @@ async function getNextiToken(tokenUrl: string, clientId: string, clientSecret: s
   return payload.access_token as string;
 }
 
-async function fetchNexti(
+async function fetchNextiReadOnly(
   baseUrl: string,
   path: string,
   token: string,
   query?: Record<string, string>,
 ): Promise<Record<string, any>> {
+  if (!ALLOWED_NEXTI_READ_PATHS.some((allowedPath) => path.startsWith(allowedPath))) {
+    throw new Error(`Endpoint Nexti nao permitido para esta aplicacao: ${path}`);
+  }
+
   const url = new URL(path, baseUrl);
   for (const [key, value] of Object.entries(query ?? {})) {
     url.searchParams.set(key, value);
@@ -284,7 +292,7 @@ function extractContent<T>(payload: Record<string, any>): T[] {
 }
 
 async function fetchPerson(baseUrl: string, token: string, personId: number): Promise<NextiPerson | null> {
-  const payload = await fetchNexti(baseUrl, `/persons/${personId}`, token);
+  const payload = await fetchNextiReadOnly(baseUrl, `/persons/${personId}`, token);
   return (payload.value ?? payload) as NextiPerson;
 }
 

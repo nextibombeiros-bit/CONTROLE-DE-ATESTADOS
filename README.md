@@ -2,6 +2,17 @@
 
 Aplicacao para acompanhar colaboradores com 16 dias ou mais de atestados medicos dentro de um periodo movel, usando React/Vite, Supabase e sincronizacao com a API Nexti via Supabase Edge Function.
 
+## Escopo Nexti
+
+Este sistema e apenas de consulta e controle. A integracao com a Nexti nao cria, altera nem exclui lancamentos na Nexti.
+
+A Edge Function usa `POST` somente para obter token OAuth em `/security/oauth/token`. Depois disso, a Nexti e acessada apenas por consultas `GET` nos endpoints permitidos:
+
+- `/absences/lastupdate/start/{start}/finish/{finish}`
+- `/persons/{id}`
+
+Qualquer outro caminho da API Nexti e bloqueado pela propria funcao.
+
 ## Seguranca
 
 Os segredos da Nexti e a `service_role` do Supabase devem ficar somente nas variaveis da Edge Function. Nao coloque esses valores no frontend, no GitHub Pages, no README ou em commits.
