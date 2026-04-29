@@ -6,7 +6,7 @@ Aplicacao para acompanhar colaboradores com 16 dias ou mais de atestados medicos
 
 Este sistema e apenas de consulta e controle. A integracao com a Nexti nao cria, altera nem exclui lancamentos na Nexti.
 
-A Edge Function usa `POST` somente para obter token OAuth em `/security/oauth/token`. Depois disso, a Nexti e acessada apenas por consultas `GET` nos endpoints permitidos:
+A Edge Function usa `POST` somente para obter token OAuth em `/security/oauth/token`, com `Authorization: Basic` e `grant_type=client_credentials`. Depois disso, a Nexti e acessada apenas por consultas `GET` nos endpoints permitidos:
 
 - `/absences/lastupdate/start/{start}/finish/{finish}`
 - `/persons/{id}`

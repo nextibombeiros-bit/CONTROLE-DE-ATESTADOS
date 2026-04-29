@@ -40,7 +40,7 @@ const corsHeaders = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const ALLOWED_NEXTI_READ_PATHS = ["/absences/lastupdate/", "/persons/"];
+const ALLOWED_NEXTI_READ_PATHS = ["/absences/lastupdate/", "/persons/", "/persons/all"];
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") {
@@ -86,9 +86,7 @@ Deno.serve(async (request) => {
 
   try {
     const token = await getNextiToken(nextiTokenUrl, nextiClientId, nextiClientSecret);
-    const personCache = new Map<number, NextiPerson | null>();
-    let imported = 0;
-    let updated = 0;
+    const absencesById = new Map<number, NextiAbsence>();
     let skippedByFilter = 0;
 
     for (const chunk of splitIntoChunks(start, finish, 31)) {
@@ -111,21 +109,26 @@ Deno.serve(async (request) => {
             continue;
           }
 
-          let person = personCache.get(absence.personId);
-          if (person === undefined) {
-            person = await fetchPerson(nextiBaseUrl, token, absence.personId);
-            personCache.set(absence.personId, person);
-          }
-
-          await upsertPerson(admin, absence, person);
-          const upsertResult = await upsertAbsence(admin, absence, person);
-          if (upsertResult === "created") imported += 1;
-          if (upsertResult === "updated") updated += 1;
+          absencesById.set(absence.id, absence);
         }
 
         page += 1;
       }
     }
+
+    const absences = Array.from(absencesById.values());
+    const personIds = new Set(absences.map((absence) => absence.personId).filter(isNumber));
+    const personMap = absences.length > 0 ? await fetchAllPersons(nextiBaseUrl, token, personIds) : new Map();
+    const existingIds = await fetchExistingAbsenceIds(
+      admin,
+      absences.map((absence) => absence.id).filter(isNumber),
+    );
+
+    await upsertPersons(admin, absences, personMap);
+    await upsertAbsences(admin, absences, personMap);
+
+    const imported = absences.filter((absence) => absence.id && !existingIds.has(absence.id)).length;
+    const updated = absences.length - imported;
 
     await admin
       .from("sincronizacoes")
@@ -137,6 +140,8 @@ Deno.serve(async (request) => {
         detalhes: {
           skippedByFilter,
           filterEnabled: filters.ids.size > 0 || filters.externalIds.size > 0,
+          absencesProcessed: absences.length,
+          personsLoaded: personMap.size,
         },
       })
       .eq("id", log.id);
@@ -236,12 +241,15 @@ function splitIntoChunks(start: Date, finish: Date, maxDays: number): Array<{ st
 }
 
 async function getNextiToken(tokenUrl: string, clientId: string, clientSecret: string): Promise<string> {
-  const url = new URL(tokenUrl);
-  url.searchParams.set("grant_type", "client_credentials");
-  url.searchParams.set("client_id", clientId);
-  url.searchParams.set("client_secret", clientSecret);
-
-  const response = await fetch(url, { method: "POST" });
+  const basicCredentials = btoa(`${clientId}:${clientSecret}`);
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${basicCredentials}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ grant_type: "client_credentials" }),
+  });
   if (!response.ok) {
     throw new Error(`Falha ao autenticar na Nexti: ${response.status}`);
   }
@@ -291,61 +299,76 @@ function extractContent<T>(payload: Record<string, any>): T[] {
   return [];
 }
 
-async function fetchPerson(baseUrl: string, token: string, personId: number): Promise<NextiPerson | null> {
-  const payload = await fetchNextiReadOnly(baseUrl, `/persons/${personId}`, token);
-  return (payload.value ?? payload) as NextiPerson;
+async function fetchAllPersons(baseUrl: string, token: string, personIds: Set<number>): Promise<Map<number, NextiPerson>> {
+  const persons = new Map<number, NextiPerson>();
+  let page = 0;
+  let totalPages = 1;
+
+  while (page < totalPages && persons.size < personIds.size) {
+    const payload = await fetchNextiReadOnly(baseUrl, "/persons/all", token, {
+      page: String(page),
+      size: "1000",
+    });
+    const content = extractContent<NextiPerson>(payload);
+    totalPages = Number(payload.totalPages ?? payload.value?.totalPages ?? 1);
+
+    for (const person of content) {
+      if (person.id && personIds.has(person.id)) {
+        persons.set(person.id, person);
+      }
+    }
+
+    page += 1;
+  }
+
+  return persons;
 }
 
-async function upsertPerson(admin: SupabaseAdmin, absence: NextiAbsence, person: NextiPerson | null) {
-  const personId = absence.personId!;
-  const situation = person?.personSituationId ? situationLabel(person.personSituationId) : null;
+async function upsertPersons(admin: SupabaseAdmin, absences: NextiAbsence[], personMap: Map<number, NextiPerson>) {
+  const rowsByPersonId = new Map<number, Record<string, unknown>>();
 
-  const { error } = await admin.from("colaboradores").upsert(
-    {
-      person_id_nexti: personId,
+  for (const absence of absences) {
+    if (!absence.personId) continue;
+    const person = personMap.get(absence.personId) ?? null;
+    rowsByPersonId.set(absence.personId, {
+      person_id_nexti: absence.personId,
       matricula: person?.enrolment ?? null,
-      nome: person?.name ?? `Colaborador ${personId}`,
+      nome: person?.name ?? `Colaborador ${absence.personId}`,
       cargo: person?.nameCareer ?? null,
       posto: person?.workplaceName ?? person?.businessUnitName ?? null,
       empresa: person?.externalCompanyId ?? (person?.companyId ? String(person.companyId) : null),
-      situacao: situation,
+      situacao: person?.personSituationId ? situationLabel(person.personSituationId) : null,
       ultima_atualizacao: toTimestamp(person?.lastUpdate) ?? toTimestamp(absence.lastUpdate),
-      raw_json: person ?? { id: personId },
-    },
-    { onConflict: "person_id_nexti" },
-  );
+      raw_json: person ?? { id: absence.personId },
+    });
+  }
 
-  if (error) throw new Error(`Erro ao salvar colaborador ${personId}: ${error.message}`);
+  for (const rows of chunkArray(Array.from(rowsByPersonId.values()), 500)) {
+    const { error } = await admin.from("colaboradores").upsert(rows, { onConflict: "person_id_nexti" });
+    if (error) throw new Error(`Erro ao salvar colaboradores: ${error.message}`);
+  }
 }
 
-async function upsertAbsence(
+async function upsertAbsences(
   admin: SupabaseAdmin,
-  absence: NextiAbsence,
-  person: NextiPerson | null,
-): Promise<"created" | "updated"> {
-  if (!absence.id || !absence.personId) return "updated";
+  absences: NextiAbsence[],
+  personMap: Map<number, NextiPerson>,
+) {
+  const rows = absences.flatMap((absence) => {
+    if (!absence.id || !absence.personId || !absence.startDateTime) return [];
+    const start = toDateOnly(absence.startDateTime);
+    const finish = toDateOnly(absence.finishDateTime ?? absence.startDateTime);
+    if (!start || !finish) return [];
+    const person = personMap.get(absence.personId) ?? null;
+    const cid = [absence.cidCode, absence.cidDescription].filter(Boolean).join(" - ") || null;
 
-  const absenceId = absence.id;
-  const personId = absence.personId;
-  const start = toDateOnly(absence.startDateTime);
-  const finish = toDateOnly(absence.finishDateTime ?? absence.startDateTime);
-  if (!start || !finish) return "updated";
-
-  const { data: existing } = await admin
-    .from("atestados")
-    .select("id")
-    .eq("id_nexti", absenceId)
-    .maybeSingle();
-
-  const cid = [absence.cidCode, absence.cidDescription].filter(Boolean).join(" - ") || null;
-  const { error } = await admin.from("atestados").upsert(
-    {
+    return [{
       id_nexti: absence.id,
-      person_id_nexti: personId,
+      person_id_nexti: absence.personId,
       matricula: person?.enrolment ?? null,
       data_inicio: start,
       data_fim: finish,
-      dias: inclusiveDays(absence.startDateTime!, absence.finishDateTime),
+      dias: inclusiveDays(absence.startDateTime, absence.finishDateTime),
       data_lancamento: toTimestamp(absence.lastUpdate),
       lancado_por: absence.userRegisterId ? String(absence.userRegisterId) : null,
       cid,
@@ -354,12 +377,27 @@ async function upsertAbsence(
       tipo_ausencia_external_id: absence.absenceSituationExternalId ?? null,
       removido: Boolean(absence.removed),
       raw_json: absence,
-    },
-    { onConflict: "id_nexti" },
-  );
+    }];
+  });
 
-  if (error) throw new Error(`Erro ao salvar atestado ${absence.id}: ${error.message}`);
-  return existing ? "updated" : "created";
+  for (const chunk of chunkArray(rows, 500)) {
+    const { error } = await admin.from("atestados").upsert(chunk, { onConflict: "id_nexti" });
+    if (error) throw new Error(`Erro ao salvar atestados: ${error.message}`);
+  }
+}
+
+async function fetchExistingAbsenceIds(admin: SupabaseAdmin, ids: number[]): Promise<Set<number>> {
+  const existing = new Set<number>();
+
+  for (const chunk of chunkArray(ids, 500)) {
+    const { data, error } = await admin.from("atestados").select("id_nexti").in("id_nexti", chunk);
+    if (error) throw new Error(`Erro ao consultar atestados existentes: ${error.message}`);
+    for (const row of data ?? []) {
+      if (typeof row.id_nexti === "number") existing.add(row.id_nexti);
+    }
+  }
+
+  return existing;
 }
 
 function situationLabel(id: number): string {
@@ -373,7 +411,9 @@ function readMedicalFilters(): { ids: Set<number>; externalIds: Set<string> } {
   const ids = new Set(
     (Deno.env.get("NEXTI_MEDICAL_ABSENCE_SITUATION_IDS") ?? "")
       .split(",")
-      .map((item) => Number(item.trim()))
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => Number(item))
       .filter((item) => Number.isFinite(item)),
   );
   const externalIds = new Set(
@@ -390,4 +430,16 @@ function matchesMedicalFilter(absence: NextiAbsence, filters: { ids: Set<number>
   if (absence.absenceSituationId && filters.ids.has(absence.absenceSituationId)) return true;
   if (absence.absenceSituationExternalId && filters.externalIds.has(absence.absenceSituationExternalId)) return true;
   return false;
+}
+
+function isNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 }
