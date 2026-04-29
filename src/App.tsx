@@ -1,12 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Session } from "@supabase/supabase-js";
 import {
   AlertTriangle,
   CalendarDays,
   CheckCircle2,
   Eye,
   Loader2,
-  LogOut,
   RefreshCw,
   Search,
   ShieldAlert,
@@ -27,10 +25,6 @@ const summaryConfig: Array<{ key: StatusKey; label: string; icon: typeof AlertTr
 ];
 
 function App() {
-  const [session, setSession] = useState<Session | null>(null);
-  const [email, setEmail] = useState("");
-  const [authMessage, setAuthMessage] = useState("");
-  const [authLoading, setAuthLoading] = useState(false);
   const [periodMode, setPeriodMode] = useState<PeriodMode>("60");
   const [startDate, setStartDate] = useState(startDateForPreset(60));
   const [endDate, setEndDate] = useState(todayInputValue());
@@ -43,17 +37,6 @@ function App() {
   const [selected, setSelected] = useState<ControleLinha | null>(null);
 
   useEffect(() => {
-    if (!supabase) return;
-
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
-    });
-
-    return () => data.subscription.unsubscribe();
-  }, []);
-
-  useEffect(() => {
     if (periodMode === "manual") return;
     const days = Number(periodMode);
     setStartDate(startDateForPreset(days));
@@ -61,9 +44,9 @@ function App() {
   }, [periodMode]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!supabase) return;
     void loadData();
-  }, [session, startDate, endDate]);
+  }, [startDate, endDate]);
 
   const controle = useMemo(() => buildControle(atestados, startDate, endDate), [atestados, startDate, endDate]);
 
@@ -84,28 +67,6 @@ function App() {
       ok: controle.filter((line) => line.status === "ok").length,
     };
   }, [controle]);
-
-  async function signIn(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!supabase || !email.trim()) return;
-    setAuthLoading(true);
-    setAuthMessage("");
-
-    const { error: signInError } = await supabase.auth.signInWithOtp({
-      email: email.trim(),
-      options: {
-        emailRedirectTo: window.location.origin + import.meta.env.BASE_URL,
-      },
-    });
-
-    setAuthLoading(false);
-    setAuthMessage(signInError ? signInError.message : "Link de acesso enviado para o email informado.");
-  }
-
-  async function signOut() {
-    if (!supabase) return;
-    await supabase.auth.signOut();
-  }
 
   async function loadData() {
     if (!supabase) return;
@@ -171,31 +132,6 @@ function App() {
     );
   }
 
-  if (!session) {
-    return (
-      <main className="auth-layout">
-        <form className="auth-panel" onSubmit={signIn}>
-          <ShieldAlert size={32} />
-          <h1>Controle de Atestados</h1>
-          <label htmlFor="email">Email</label>
-          <input
-            id="email"
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            placeholder="rh@empresa.com"
-            required
-          />
-          <button type="submit" disabled={authLoading}>
-            {authLoading ? <Loader2 className="spin" size={18} /> : <CheckCircle2 size={18} />}
-            Enviar link
-          </button>
-          {authMessage ? <p className="muted">{authMessage}</p> : null}
-        </form>
-      </main>
-    );
-  }
-
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -207,10 +143,6 @@ function App() {
           <button className="icon-button" type="button" onClick={syncNexti} disabled={syncing} title="Sincronizar Nexti">
             {syncing ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
             Sincronizar
-          </button>
-          <button className="icon-button secondary" type="button" onClick={signOut} title="Sair">
-            <LogOut size={18} />
-            Sair
           </button>
         </div>
       </header>

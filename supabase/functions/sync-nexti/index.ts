@@ -61,13 +61,6 @@ Deno.serve(async (request) => {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  const authHeader = request.headers.get("Authorization") ?? "";
-  const jwt = authHeader.replace(/^Bearer\s+/i, "");
-  const { data: userData, error: userError } = await admin.auth.getUser(jwt);
-  if (userError || !userData.user) {
-    return json({ error: "Sessao invalida" }, 401);
-  }
-
   const body = await safeJson(request);
   const now = new Date();
   const defaultStart = new Date(now.getTime() - 30 * DAY_MS);

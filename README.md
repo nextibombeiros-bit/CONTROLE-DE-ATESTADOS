@@ -95,10 +95,11 @@ Depois ative Pages usando GitHub Actions. O workflow gera o build com base `/CON
 ## Como usar
 
 1. Acesse o site.
-2. Informe o email para receber o link de acesso do Supabase Auth.
-3. Escolha o periodo: 30, 60, 90 dias ou intervalo manual.
-4. Clique em sincronizar para buscar dados da Nexti por `lastUpdate`.
-5. A tabela mostra uma linha por colaborador, ordenada pelo maior total de dias.
+2. Escolha o periodo: 30, 60, 90 dias ou intervalo manual.
+3. Clique em sincronizar para buscar dados da Nexti por `lastUpdate`.
+4. A tabela mostra uma linha por colaborador, ordenada pelo maior total de dias.
+
+O acesso ao dashboard esta sem login. As policies do Supabase permitem leitura publica das tabelas usadas pela tela.
 
 ## Regras de status
 
