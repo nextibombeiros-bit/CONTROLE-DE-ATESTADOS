@@ -1,6 +1,5 @@
 create extension if not exists pg_net;
 create extension if not exists pg_cron;
-create extension if not exists vault;
 
 alter table public.colaboradores
   add column if not exists ativo boolean not null default true,
@@ -99,32 +98,10 @@ security definer
 set search_path = public
 as $function$
 declare
-  project_secret_id uuid;
   existing_job_id bigint;
 begin
   if coalesce(trim(project_url), '') = '' then
     raise exception 'project_url obrigatoria';
-  end if;
-
-  select id
-    into project_secret_id
-  from vault.decrypted_secrets
-  where name = 'sync_nexti_project_url'
-  limit 1;
-
-  if project_secret_id is null then
-    perform vault.create_secret(
-      project_url,
-      'sync_nexti_project_url',
-      'URL do projeto usada pelo cron automatico do sync-nexti'
-    );
-  else
-    perform vault.update_secret(
-      project_secret_id,
-      project_url,
-      'sync_nexti_project_url',
-      'URL do projeto usada pelo cron automatico do sync-nexti'
-    );
   end if;
 
   select jobid
@@ -139,17 +116,19 @@ begin
   perform cron.schedule(
     'sync-nexti-auto',
     cron_expression,
-    $job$
-    select net.http_post(
-      url:= (select decrypted_secret from vault.decrypted_secrets where name = 'sync_nexti_project_url')
-        || '/functions/v1/sync-nexti',
-      headers:=jsonb_build_object(
-        'Content-Type', 'application/json',
-        'X-Sync-Source', 'supabase-cron'
-      ),
-      body:='{"automatic": true}'::jsonb
-    ) as request_id;
-    $job$
+    format(
+      $job$
+      select net.http_post(
+        url:=%L || '/functions/v1/sync-nexti',
+        headers:=jsonb_build_object(
+          'Content-Type', 'application/json',
+          'X-Sync-Source', 'supabase-cron'
+        ),
+        body:='{"automatic": true}'::jsonb
+      ) as request_id;
+      $job$,
+      project_url
+    )
   );
 end;
 $function$;

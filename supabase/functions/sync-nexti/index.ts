@@ -436,10 +436,23 @@ async function fetchNextiReadOnly(
 
   if (!response.ok) {
     const text = await response.text();
+    if (isNextiNoDataResponse(path, response.status, text)) {
+      return [];
+    }
     throw new Error(`Nexti ${path} retornou ${response.status}: ${text.slice(0, 240)}`);
   }
 
   return await response.json();
+}
+
+function isNextiNoDataResponse(path: string, status: number, payload: string): boolean {
+  if (status !== 409) return false;
+  if (!path.startsWith("/absences/lastupdate/") && !path.startsWith("/useraccounts/startdate/")) {
+    return false;
+  }
+
+  const message = normalizeText(payload);
+  return message.includes("nao foi encontrado nenhum dado");
 }
 
 function extractContent<T>(payload: Record<string, unknown> | unknown[]): T[] {
