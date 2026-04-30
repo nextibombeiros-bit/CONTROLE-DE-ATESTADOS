@@ -29,8 +29,11 @@ type NextiPerson = {
   name?: string;
   nameCareer?: string;
   workplaceName?: string;
+  careerId?: number;
+  workplaceId?: number;
   companyId?: number;
   externalCompanyId?: string;
+  businessUnitId?: number;
   businessUnitName?: string;
   personSituationId?: number;
   lastUpdate?: string;
@@ -55,9 +58,49 @@ type NextiUserAccount = {
   id?: number;
   name?: string;
   email?: string;
+  personName?: string;
   profileName?: string;
   status?: boolean;
   [key: string]: unknown;
+};
+
+type NextiCareer = {
+  id?: number;
+  name?: string;
+  active?: boolean;
+  [key: string]: unknown;
+};
+
+type NextiBusinessUnit = {
+  id?: number;
+  name?: string;
+  companyName?: string;
+  active?: boolean;
+  [key: string]: unknown;
+};
+
+type NextiWorkplace = {
+  id?: number;
+  name?: string;
+  businessUnitId?: number;
+  companyId?: number;
+  active?: boolean;
+  [key: string]: unknown;
+};
+
+type NextiCompany = {
+  id?: number;
+  companyName?: string;
+  fantasyName?: string;
+  active?: boolean;
+  [key: string]: unknown;
+};
+
+type ReferenceData = {
+  careers: Map<number, NextiCareer>;
+  businessUnits: Map<number, NextiBusinessUnit>;
+  workplaces: Map<number, NextiWorkplace>;
+  companies: Map<number, NextiCompany>;
 };
 
 type MedicalFilterConfig = {
@@ -91,9 +134,13 @@ const RUNNING_SYNC_TIMEOUT_MINUTES = 20;
 const ALLOWED_NEXTI_READ_PATHS = [
   "/absences/lastupdate/",
   "/absencesituations/",
+  "/businessunits/",
+  "/careers/",
+  "/companies/",
   "/persons/",
   "/persons/all",
   "/useraccounts/startdate/",
+  "/workplaces/",
 ];
 
 Deno.serve(async (request) => {
@@ -171,12 +218,15 @@ Deno.serve(async (request) => {
       absences.map((absence) => absence.id).filter(isNumber),
     );
 
+    const references = await fetchReferenceData(nextiBaseUrl, token, personMap);
     const userMap = await fetchUserAccounts(nextiBaseUrl, token, now);
+    const operatorIds = await collectOperatorIds(admin, absences);
+    const operatorNames = await resolveOperatorNames(admin, operatorIds, userMap, personMap);
 
-    await upsertPersons(admin, absences, personMap);
-    await upsertAbsences(admin, absences, personMap, userMap, situationIndex);
+    await upsertPersons(admin, absences, personMap, references);
+    await upsertAbsences(admin, absences, personMap, operatorNames, situationIndex);
     await refreshExistingAbsenceMetadata(admin, situationIndex);
-    await refreshExistingUserNames(admin, userMap);
+    await refreshExistingUserNames(admin, operatorNames);
 
     const imported = absences.filter((absence) => absence.id && !existingIds.has(absence.id)).length;
     const updated = absences.length - imported;
@@ -195,6 +245,7 @@ Deno.serve(async (request) => {
           absencesProcessed: absences.length,
           personsLoaded: personMap.size,
           userAccountsLoaded: userMap.size,
+          operatorNamesResolved: operatorNames.size,
           medicalSituationsDetected: situationIndex.detectedMedicalIds.size +
             situationIndex.detectedMedicalExternalIds.size,
           maxLastUpdateSeen: maxLastUpdateSeen?.toISOString() ?? null,
@@ -734,6 +785,87 @@ async function fetchAllPersons(baseUrl: string, token: string, personIds: Set<nu
   return persons;
 }
 
+async function fetchReferenceData(
+  baseUrl: string,
+  token: string,
+  personMap: Map<number, NextiPerson>,
+): Promise<ReferenceData> {
+  const careerIds = new Set<number>();
+  const businessUnitIds = new Set<number>();
+  const workplaceIds = new Set<number>();
+  const companyIds = new Set<number>();
+
+  for (const person of personMap.values()) {
+    if (isNumber(person.careerId)) careerIds.add(person.careerId);
+    if (isNumber(person.businessUnitId)) businessUnitIds.add(person.businessUnitId);
+    if (isNumber(person.workplaceId)) workplaceIds.add(person.workplaceId);
+    if (isNumber(person.companyId)) companyIds.add(person.companyId);
+  }
+
+  const [careers, businessUnits, workplaces, companies] = await Promise.all([
+    fetchReferenceMap<NextiCareer>(baseUrl, "/careers/all", token, careerIds),
+    fetchReferenceMap<NextiBusinessUnit>(baseUrl, "/businessunits/all", token, businessUnitIds),
+    fetchReferenceMap<NextiWorkplace>(baseUrl, "/workplaces/all", token, workplaceIds),
+    fetchReferenceMap<NextiCompany>(baseUrl, "/companies/all", token, companyIds),
+  ]);
+
+  return {
+    careers,
+    businessUnits,
+    workplaces,
+    companies,
+  };
+}
+
+async function fetchReferenceMap<T extends { id?: number }>(
+  baseUrl: string,
+  path: string,
+  token: string,
+  ids: Set<number>,
+): Promise<Map<number, T>> {
+  if (ids.size === 0) {
+    return new Map<number, T>();
+  }
+
+  const items = await fetchPagedCollection<T>(baseUrl, path, token);
+  const map = new Map<number, T>();
+
+  for (const item of items) {
+    if (!isNumber(item.id) || !ids.has(item.id)) continue;
+    map.set(item.id, item);
+  }
+
+  return map;
+}
+
+async function fetchPagedCollection<T>(
+  baseUrl: string,
+  path: string,
+  token: string,
+): Promise<T[]> {
+  const items: T[] = [];
+  let page = 0;
+  let totalPages = 1;
+
+  while (page < totalPages) {
+    const payload = await fetchNextiReadOnly(baseUrl, path, token, {
+      page: String(page),
+      size: "500",
+    });
+    const content = extractContent<T>(payload);
+    items.push(...content);
+
+    if (Array.isArray(payload)) {
+      break;
+    }
+
+    totalPages = readTotalPages(payload);
+    page += 1;
+  }
+
+  return items;
+}
+
 async function fetchUserAccounts(
   baseUrl: string,
   token: string,
@@ -763,22 +895,149 @@ async function fetchUserAccounts(
   return userMap;
 }
 
+async function collectOperatorIds(admin: SupabaseAdmin, absences: NextiAbsence[]): Promise<Set<number>> {
+  const ids = new Set<number>();
+
+  for (const absence of absences) {
+    if (isNumber(absence.userRegisterId)) {
+      ids.add(absence.userRegisterId);
+    }
+  }
+
+  const unresolvedIds = await fetchUnresolvedOperatorIds(admin);
+  for (const id of unresolvedIds) {
+    ids.add(id);
+  }
+
+  return ids;
+}
+
+async function fetchUnresolvedOperatorIds(admin: SupabaseAdmin): Promise<Set<number>> {
+  const ids = new Set<number>();
+  const pageSize = 1000;
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await admin
+      .from("atestados")
+      .select("lancado_por_id")
+      .not("lancado_por_id", "is", null)
+      .is("lancado_por_nome", null)
+      .range(from, from + pageSize - 1);
+
+    if (error) {
+      throw new Error(`Erro ao consultar operadores sem nome: ${error.message}`);
+    }
+
+    for (const row of data ?? []) {
+      if (isNumber(row.lancado_por_id)) {
+        ids.add(row.lancado_por_id);
+      }
+    }
+
+    if (!data || data.length < pageSize) break;
+    from += pageSize;
+  }
+
+  return ids;
+}
+
+async function resolveOperatorNames(
+  admin: SupabaseAdmin,
+  operatorIds: Set<number>,
+  userMap: Map<number, NextiUserAccount>,
+  personMap: Map<number, NextiPerson>,
+): Promise<Map<number, string>> {
+  const resolved = new Map<number, string>();
+  const overrides = readOperatorNameOverrides();
+
+  for (const [operatorId, name] of overrides.entries()) {
+    if (operatorIds.has(operatorId)) {
+      resolved.set(operatorId, name);
+    }
+  }
+
+  for (const operatorId of operatorIds) {
+    const user = userMap.get(operatorId);
+    const userName = firstNonEmpty(user?.name, user?.personName);
+    if (userName) {
+      resolved.set(operatorId, userName);
+    }
+  }
+
+  for (const person of personMap.values()) {
+    if (!isNumber(person.userAccountId) || !operatorIds.has(person.userAccountId)) continue;
+    const personName = firstNonEmpty(person.name);
+    if (personName && !resolved.has(person.userAccountId)) {
+      resolved.set(person.userAccountId, personName);
+    }
+  }
+
+  const missingIds = Array.from(operatorIds).filter((operatorId) => !resolved.has(operatorId));
+  if (missingIds.length === 0) {
+    return resolved;
+  }
+
+  for (const chunk of chunkArray(missingIds, 500)) {
+    const { data, error } = await admin
+      .from("colaboradores")
+      .select("nome, user_account_id_nexti")
+      .in("user_account_id_nexti", chunk);
+
+    if (error) {
+      throw new Error(`Erro ao consultar fallback de operadores: ${error.message}`);
+    }
+
+    for (const row of data ?? []) {
+      if (!isNumber(row.user_account_id_nexti) || !row.nome) continue;
+      if (!resolved.has(row.user_account_id_nexti)) {
+        resolved.set(row.user_account_id_nexti, row.nome);
+      }
+    }
+  }
+
+  return resolved;
+}
+
+function readOperatorNameOverrides(): Map<number, string> {
+  const raw = Deno.env.get("NEXTI_OPERATOR_NAME_OVERRIDES") ?? "";
+  const map = new Map<number, string>();
+
+  for (const entry of raw.split(";")) {
+    const [idRaw, ...nameParts] = entry.split("=");
+    const id = Number(idRaw?.trim());
+    const name = nameParts.join("=").trim();
+    if (!Number.isFinite(id) || !name) continue;
+    map.set(id, name);
+  }
+
+  return map;
+}
+
 async function upsertPersons(
   admin: SupabaseAdmin,
   absences: NextiAbsence[],
   personMap: Map<number, NextiPerson>,
+  references: ReferenceData,
 ) {
   const rowsByPersonId = new Map<number, Record<string, unknown>>();
 
   for (const person of personMap.values()) {
     if (!isNumber(person.id)) continue;
+    const career = isNumber(person.careerId) ? references.careers.get(person.careerId) ?? null : null;
+    const businessUnit = isNumber(person.businessUnitId)
+      ? references.businessUnits.get(person.businessUnitId) ?? null
+      : null;
+    const workplace = isNumber(person.workplaceId) ? references.workplaces.get(person.workplaceId) ?? null : null;
+    const company = isNumber(person.companyId) ? references.companies.get(person.companyId) ?? null : null;
+
     rowsByPersonId.set(person.id, {
       person_id_nexti: person.id,
       matricula: person.enrolment ?? null,
       nome: person.name ?? `Colaborador ${person.id}`,
-      cargo: person.nameCareer ?? null,
-      posto: person.workplaceName ?? person.businessUnitName ?? null,
-      empresa: person.externalCompanyId ?? (person.companyId ? String(person.companyId) : null),
+      cargo: firstNonEmpty(person.nameCareer, career?.name),
+      posto: firstNonEmpty(person.workplaceName, workplace?.name, person.businessUnitName, businessUnit?.name),
+      empresa: resolveCompanyLabel(company, businessUnit, person),
       situacao: isNumber(person.personSituationId) ? situationLabel(person.personSituationId) : null,
       ultima_atualizacao: toTimestamp(person.lastUpdate),
       ativo: person.personSituationId !== 3,
@@ -816,7 +1075,7 @@ async function upsertAbsences(
   admin: SupabaseAdmin,
   absences: NextiAbsence[],
   personMap: Map<number, NextiPerson>,
-  userMap: Map<number, NextiUserAccount>,
+  operatorNames: Map<number, string>,
   situationIndex: SituationIndex,
 ) {
   const rows = absences.flatMap((absence) => {
@@ -827,10 +1086,11 @@ async function upsertAbsences(
 
     const person = personMap.get(absence.personId) ?? null;
     const situation = resolveSituation(absence, situationIndex);
-    const user = isNumber(absence.userRegisterId) ? userMap.get(absence.userRegisterId) ?? null : null;
     const cid = [absence.cidCode, absence.cidDescription].filter(Boolean).join(" - ") || null;
     const medico = [absence.medicalDoctorName, absence.medicalDoctorCrm].filter(Boolean).join(" / ") || null;
-    const lancadoPorNome = user?.name ?? null;
+    const lancadoPorNome = isNumber(absence.userRegisterId)
+      ? operatorNames.get(absence.userRegisterId) ?? null
+      : null;
     const lancadoPorTexto = lancadoPorNome ?? (isNumber(absence.userRegisterId) ? String(absence.userRegisterId) : null);
 
     return [{
@@ -886,12 +1146,11 @@ async function refreshExistingAbsenceMetadata(admin: SupabaseAdmin, situationInd
   }
 }
 
-async function refreshExistingUserNames(admin: SupabaseAdmin, userMap: Map<number, NextiUserAccount>) {
-  for (const [userId, user] of userMap.entries()) {
-    if (!user.name) continue;
+async function refreshExistingUserNames(admin: SupabaseAdmin, operatorNames: Map<number, string>) {
+  for (const [userId, userName] of operatorNames.entries()) {
     const patch = {
-      lancado_por: user.name,
-      lancado_por_nome: user.name,
+      lancado_por: userName,
+      lancado_por_nome: userName,
     };
     const { error } = await admin.from("atestados").update(patch).eq("lancado_por_id", userId);
     if (error) throw new Error(`Erro ao atualizar nomes de usuarios Nexti: ${error.message}`);
@@ -910,6 +1169,40 @@ async function fetchExistingAbsenceIds(admin: SupabaseAdmin, ids: number[]): Pro
   }
 
   return existing;
+}
+
+function firstNonEmpty(...values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return null;
+}
+
+function resolveCompanyLabel(
+  company: NextiCompany | null,
+  businessUnit: NextiBusinessUnit | null,
+  person: NextiPerson,
+): string | null {
+  const source = firstNonEmpty(company?.fantasyName, company?.companyName, businessUnit?.companyName, person.businessUnitName);
+  if (!source) {
+    return person.externalCompanyId ?? (isNumber(person.companyId) ? String(person.companyId) : null);
+  }
+
+  const normalized = normalizeText(source);
+  if (normalized.includes("rb facilities")) return "RB Facilities";
+  if (normalized.includes("acaz")) return "Acaz";
+  if (normalized.includes("bombeir")) return "Dunamis Bombeiros";
+  if (normalized.includes("dunamis") && (normalized.includes("segur") || normalized.includes("vigil"))) {
+    return "Dunamis Segurança";
+  }
+  if (normalized.includes("dunamis") && normalized.includes("servic")) {
+    return "Dunamis Serviços";
+  }
+
+  return source;
 }
 
 function situationLabel(id: number): string {

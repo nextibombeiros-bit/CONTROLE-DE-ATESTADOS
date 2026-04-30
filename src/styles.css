@@ -172,6 +172,31 @@ button:disabled {
   background: #ffffff;
 }
 
+.view-switch {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(170px, 1fr));
+  overflow: hidden;
+  border: 1px solid #cfd8e3;
+  border-radius: 6px;
+}
+
+.view-switch button {
+  min-height: 40px;
+  padding: 0 14px;
+  background: #ffffff;
+  color: #334155;
+  font-weight: 800;
+}
+
+.view-switch button + button {
+  border-left: 1px solid #cfd8e3;
+}
+
+.view-switch button.active {
+  background: #176f8f;
+  color: #ffffff;
+}
+
 .segmented {
   display: inline-grid;
   grid-template-columns: repeat(4, minmax(76px, 1fr));
@@ -244,6 +269,10 @@ button:disabled {
   margin-bottom: 20px;
 }
 
+.summary-grid-historico {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .summary-card {
   position: relative;
   min-height: 112px;
@@ -313,7 +342,7 @@ button:disabled {
 
 table {
   width: 100%;
-  min-width: 1050px;
+  min-width: 1180px;
   border-collapse: collapse;
 }
 
@@ -472,6 +501,20 @@ td {
 
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .summary-grid-historico {
+    grid-template-columns: 1fr;
+  }
+
+  .view-switch {
+    width: 100%;
+    grid-template-columns: 1fr;
+  }
+
+  .view-switch button + button {
+    border-top: 1px solid #cfd8e3;
+    border-left: 0;
   }
 
   .segmented {

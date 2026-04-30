@@ -4,26 +4,27 @@ import {
   CalendarDays,
   CheckCircle2,
   Eye,
-  Loader2,
   Search,
   ShieldAlert,
 } from "lucide-react";
 import { supabase, hasSupabaseConfig } from "@/lib/supabase.ts";
-import { buildControle } from "@/lib/controle.ts";
+import { buildControle, buildHistoricoAlertas } from "@/lib/controle.ts";
 import {
   formatDateBR,
-  formatDateTimeBR,
   periodLabel,
   startDateForPreset,
   todayInputValue,
 } from "@/lib/date.ts";
 import { statusLabels } from "@/lib/status.ts";
-import type { Atestado, ControleLinha, Sincronizacao, StatusKey } from "@/types.ts";
+import type { Atestado, ControleLinha, HistoricoAlertaLinha, Sincronizacao, StatusKey } from "@/types.ts";
 
 type PeriodMode = "30" | "60" | "90" | "manual";
+type ViewMode = "controle" | "historico";
+type LinhaSelecionavel = ControleLinha | HistoricoAlertaLinha;
 
 const AUTO_SYNC_STALE_MS = 10 * 60 * 1000;
 const AUTO_SYNC_COOLDOWN_MS = 60 * 1000;
+const PAGE_SIZE = 1000;
 
 const summaryConfig: Array<{ key: StatusKey; label: string; icon: typeof AlertTriangle }> = [
   { key: "alerta", label: "Alerta 16+", icon: ShieldAlert },
@@ -33,6 +34,7 @@ const summaryConfig: Array<{ key: StatusKey; label: string; icon: typeof AlertTr
 ];
 
 function App() {
+  const [viewMode, setViewMode] = useState<ViewMode>("controle");
   const [periodMode, setPeriodMode] = useState<PeriodMode>("60");
   const [startDate, setStartDate] = useState(startDateForPreset(60));
   const [endDate, setEndDate] = useState(todayInputValue());
@@ -42,7 +44,7 @@ function App() {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
-  const [selected, setSelected] = useState<ControleLinha | null>(null);
+  const [selected, setSelected] = useState<LinhaSelecionavel | null>(null);
   const reloadTimerRef = useRef<number | null>(null);
   const lastAutoSyncRequestRef = useRef(0);
 
@@ -59,21 +61,8 @@ function App() {
     setError("");
 
     const [{ data: atestadosData, error: atestadosError }, { data: syncData, error: syncError }] = await Promise.all([
-      supabase
-        .from("atestados")
-        .select("*, colaboradores!inner(*)")
-        .eq("removido", false)
-        .eq("eh_atestado_medico", true)
-        .eq("colaboradores.ativo", true)
-        .lte("data_inicio", endDate)
-        .gte("data_fim", startDate)
-        .order("data_inicio", { ascending: false }),
-      supabase
-        .from("sincronizacoes")
-        .select("*")
-        .order("iniciado_em", { ascending: false })
-        .limit(1)
-        .maybeSingle(),
+      fetchAllAtestados(),
+      supabase.from("sincronizacoes").select("*").order("iniciado_em", { ascending: false }).limit(1).maybeSingle(),
     ]);
 
     if (atestadosError) {
@@ -115,7 +104,7 @@ function App() {
   useEffect(() => {
     if (!supabase) return;
     void loadData();
-  }, [startDate, endDate]);
+  }, []);
 
   useEffect(() => {
     const client = supabase;
@@ -149,7 +138,7 @@ function App() {
       }
       void client.removeChannel(channel);
     };
-  }, [startDate, endDate]);
+  }, []);
 
   useEffect(() => {
     if (!supabase || syncing) return;
@@ -169,14 +158,27 @@ function App() {
   }, [syncLog, syncing]);
 
   const controle = useMemo(() => buildControle(atestados, startDate, endDate), [atestados, startDate, endDate]);
+  const historicoAlertas = useMemo(() => buildHistoricoAlertas(atestados), [atestados]);
 
   const filteredControle = useMemo(() => {
     const term = search.trim().toLowerCase();
     if (!term) return controle;
     return controle.filter((line) =>
-      [line.matricula, line.colaborador, line.cargo, line.posto].some((value) => value.toLowerCase().includes(term)),
+      [line.matricula, line.colaborador, line.cargo, line.posto, line.empresa].some((value) =>
+        value.toLowerCase().includes(term),
+      ),
     );
   }, [controle, search]);
+
+  const filteredHistorico = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return historicoAlertas;
+    return historicoAlertas.filter((line) =>
+      [line.matricula, line.colaborador, line.cargo, line.posto, line.empresa].some((value) =>
+        value.toLowerCase().includes(term),
+      ),
+    );
+  }, [historicoAlertas, search]);
 
   const totals = useMemo(() => {
     return {
@@ -187,6 +189,16 @@ function App() {
       ok: controle.filter((line) => line.status === "ok").length,
     };
   }, [controle]);
+
+  const historicoTotals = useMemo(() => {
+    return {
+      colaboradores: historicoAlertas.length,
+      maiorPico: historicoAlertas[0]?.totalDias ?? 0,
+      empresas: new Set(historicoAlertas.map((line) => line.empresa).filter((value) => value && value !== "-")).size,
+    };
+  }, [historicoAlertas]);
+
+  const linhasVisiveis = viewMode === "controle" ? filteredControle : filteredHistorico;
 
   const historicoSelecionado = useMemo(() => {
     if (!selected) return [];
@@ -213,98 +225,125 @@ function App() {
         <div>
           <p className="eyebrow">RH / DP</p>
           <h1>Controle de Atestados</h1>
-          <p className="muted">Espelho automatico dos atestados medicos da Nexti, sem ferias, faltas e desligados.</p>
-        </div>
-        <div className="topbar-actions">
-          <div className={`sync-pill ${syncing ? "running" : ""}`}>
-            {syncing ? <Loader2 className="spin" size={16} /> : <ShieldAlert size={16} />}
-            {syncing ? "Atualizando automaticamente" : "Atualizacao automatica ativa"}
-          </div>
-          <p className="muted sync-caption">
-            {syncLog
-              ? `Ultima sincronizacao: ${formatDateTimeBR(syncLog.finalizado_em ?? syncLog.iniciado_em)}`
-              : "Aguardando primeira sincronizacao automatica"}
-          </p>
         </div>
       </header>
 
       <section className="toolbar">
-        <div className="segmented" aria-label="Periodo">
-          {(["30", "60", "90"] as PeriodMode[]).map((mode) => (
-            <button
-              key={mode}
-              type="button"
-              className={periodMode === mode ? "active" : ""}
-              onClick={() => setPeriodMode(mode)}
-            >
-              {mode} dias
-            </button>
-          ))}
+        <div className="view-switch" aria-label="Visao">
           <button
             type="button"
-            className={periodMode === "manual" ? "active" : ""}
-            onClick={() => setPeriodMode("manual")}
+            className={viewMode === "controle" ? "active" : ""}
+            onClick={() => setViewMode("controle")}
           >
-            Manual
+            Controle atual
+          </button>
+          <button
+            type="button"
+            className={viewMode === "historico" ? "active" : ""}
+            onClick={() => setViewMode("historico")}
+          >
+            Historico 16+ / 60 dias
           </button>
         </div>
-        <label className="date-field">
-          <CalendarDays size={16} />
-          <input
-            type="date"
-            value={startDate}
-            onChange={(event) => {
-              setPeriodMode("manual");
-              setStartDate(event.target.value);
-            }}
-          />
-        </label>
-        <label className="date-field">
-          <CalendarDays size={16} />
-          <input
-            type="date"
-            value={endDate}
-            onChange={(event) => {
-              setPeriodMode("manual");
-              setEndDate(event.target.value);
-            }}
-          />
-        </label>
+
+        {viewMode === "controle" ? (
+          <>
+            <div className="segmented" aria-label="Periodo">
+              {(["30", "60", "90"] as PeriodMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={periodMode === mode ? "active" : ""}
+                  onClick={() => setPeriodMode(mode)}
+                >
+                  {mode} dias
+                </button>
+              ))}
+              <button
+                type="button"
+                className={periodMode === "manual" ? "active" : ""}
+                onClick={() => setPeriodMode("manual")}
+              >
+                Manual
+              </button>
+            </div>
+            <label className="date-field">
+              <CalendarDays size={16} />
+              <input
+                type="date"
+                value={startDate}
+                onChange={(event) => {
+                  setPeriodMode("manual");
+                  setStartDate(event.target.value);
+                }}
+              />
+            </label>
+            <label className="date-field">
+              <CalendarDays size={16} />
+              <input
+                type="date"
+                value={endDate}
+                onChange={(event) => {
+                  setPeriodMode("manual");
+                  setEndDate(event.target.value);
+                }}
+              />
+            </label>
+          </>
+        ) : null}
+
         <label className="search-field">
           <Search size={16} />
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Buscar matricula, nome, cargo ou posto"
+            placeholder="Buscar matricula, nome, cargo, posto ou empresa"
           />
         </label>
       </section>
 
       {error ? <div className="notice error">{error}</div> : null}
 
-      <section className="summary-grid">
-        <article className="summary-card">
-          <span>Total com atestado medico</span>
-          <strong>{totals.colaboradores}</strong>
-          <small>{periodLabel(startDate, endDate)}</small>
-        </article>
-        {summaryConfig.slice(0, 3).map(({ key, label, icon: Icon }) => (
-          <article className={`summary-card ${key}`} key={key}>
-            <span>{label}</span>
-            <strong>{totals[key]}</strong>
-            <Icon size={20} />
+      {viewMode === "controle" ? (
+        <section className="summary-grid">
+          <article className="summary-card">
+            <span>Total com atestado medico</span>
+            <strong>{totals.colaboradores}</strong>
+            <small>{periodLabel(startDate, endDate)}</small>
           </article>
-        ))}
-      </section>
+          {summaryConfig.slice(0, 3).map(({ key, label, icon: Icon }) => (
+            <article className={`summary-card ${key}`} key={key}>
+              <span>{label}</span>
+              <strong>{totals[key]}</strong>
+              <Icon size={20} />
+            </article>
+          ))}
+        </section>
+      ) : (
+        <section className="summary-grid summary-grid-historico">
+          <article className="summary-card alerta">
+            <span>Ativos com historico 16+</span>
+            <strong>{historicoTotals.colaboradores}</strong>
+            <small>Em qualquer janela movel de 60 dias</small>
+          </article>
+          <article className="summary-card">
+            <span>Maior pico em 60 dias</span>
+            <strong>{historicoTotals.maiorPico}</strong>
+            <small>Dias distintos de atestado</small>
+          </article>
+          <article className="summary-card">
+            <span>Empresas afetadas</span>
+            <strong>{historicoTotals.empresas}</strong>
+            <small>Dunamis, RB Facilities e Acaz</small>
+          </article>
+        </section>
+      )}
 
       <section className="table-section">
         <div className="section-heading">
           <div>
-            <h2>Controle</h2>
-            <p>
-              {loading ? "Carregando dados..." : `${filteredControle.length} colaboradores encontrados`}
-              {syncLog ? ` | Atualizado em: ${formatDateTimeBR(syncLog.finalizado_em ?? syncLog.iniciado_em)}` : ""}
-            </p>
+            <h2>{viewMode === "controle" ? "Controle" : "Historico 16+ em 60 dias"}</h2>
+            <p>{loading ? "Carregando dados..." : `${linhasVisiveis.length} colaboradores encontrados`}</p>
           </div>
         </div>
 
@@ -318,13 +357,14 @@ function App() {
                 <th>Colaborador</th>
                 <th>Cargo</th>
                 <th>Posto</th>
+                <th>Empresa</th>
                 <th>Primeiro</th>
                 <th>Ultimo</th>
                 <th>Periodo</th>
               </tr>
             </thead>
             <tbody>
-              {filteredControle.map((line) => (
+              {linhasVisiveis.map((line) => (
                 <tr key={line.personId}>
                   <td>
                     <span className={`status-pill ${line.status}`}>{statusLabels[line.status]}</span>
@@ -339,15 +379,18 @@ function App() {
                   </td>
                   <td>{line.cargo}</td>
                   <td>{line.posto}</td>
+                  <td>{line.empresa}</td>
                   <td>{formatDateBR(line.primeiroAtestado)}</td>
                   <td>{formatDateBR(line.ultimoAtestado)}</td>
                   <td>{line.periodo}</td>
                 </tr>
               ))}
-              {!loading && filteredControle.length === 0 ? (
+              {!loading && linhasVisiveis.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="empty-state">
-                    Nenhum atestado medico encontrado no periodo.
+                  <td colSpan={10} className="empty-state">
+                    {viewMode === "controle"
+                      ? "Nenhum atestado medico encontrado no periodo."
+                      : "Nenhum colaborador ativo atingiu 16 dias em uma janela de 60 dias."}
                   </td>
                 </tr>
               ) : null}
@@ -364,8 +407,11 @@ function App() {
                 <p className="eyebrow">{selected.matricula}</p>
                 <h2>{selected.colaborador}</h2>
                 <p className="muted">
-                  {selected.cargo} | {selected.posto}
+                  {selected.cargo} | {selected.posto} | {selected.empresa}
                 </p>
+                {isHistoricoLinha(selected) ? (
+                  <p className="muted">Janela critica: {selected.periodo}</p>
+                ) : null}
               </div>
               <button className="icon-only" type="button" onClick={() => setSelected(null)} aria-label="Fechar">
                 x
@@ -393,8 +439,8 @@ function App() {
                       <td>{formatDateBR(item.data_inicio)}</td>
                       <td>{formatDateBR(item.data_fim)}</td>
                       <td className="days">{item.dias}</td>
-                      <td>{formatDateTimeBR(item.data_lancamento)}</td>
-                      <td>{item.lancado_por_nome ?? item.lancado_por ?? "-"}</td>
+                      <td>{item.data_lancamento ? new Date(item.data_lancamento).toLocaleString("pt-BR") : "-"}</td>
+                      <td>{formatLancadoPor(item)}</td>
                       <td>{item.cid ?? "-"}</td>
                       <td>{item.medico ?? "-"}</td>
                       <td>{item.tipo_ausencia_nome ?? item.tipo_ausencia_id ?? item.tipo_ausencia_external_id ?? "-"}</td>
@@ -413,3 +459,49 @@ function App() {
 }
 
 export default App;
+
+function isHistoricoLinha(line: LinhaSelecionavel): line is HistoricoAlertaLinha {
+  return "janelaCriticaInicio" in line && "janelaCriticaFim" in line;
+}
+
+function formatLancadoPor(item: Atestado): string {
+  if (item.lancado_por_nome) return item.lancado_por_nome;
+  if (item.lancado_por && /\D/.test(item.lancado_por)) return item.lancado_por;
+  if (typeof item.lancado_por_id === "number") return `Operador Nexti ${item.lancado_por_id}`;
+  return item.lancado_por ?? "-";
+}
+
+async function fetchAllAtestados(): Promise<{ data: Atestado[] | null; error: Error | null }> {
+  if (!supabase) {
+    return { data: null, error: new Error("Supabase nao configurado") };
+  }
+
+  const rows: Atestado[] = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from("atestados")
+      .select("*, colaboradores!inner(*)")
+      .eq("removido", false)
+      .eq("eh_atestado_medico", true)
+      .eq("colaboradores.ativo", true)
+      .order("data_inicio", { ascending: false })
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error) {
+      return { data: null, error: new Error(error.message) };
+    }
+
+    const chunk = ((data ?? []) as Atestado[]);
+    rows.push(...chunk);
+
+    if (chunk.length < PAGE_SIZE) {
+      break;
+    }
+
+    from += PAGE_SIZE;
+  }
+
+  return { data: rows, error: null };
+}

@@ -46,9 +46,27 @@ export type ControleLinha = {
   colaborador: string;
   cargo: string;
   posto: string;
+  empresa: string;
   primeiroAtestado: string;
   ultimoAtestado: string;
   periodo: string;
+  atestados: Atestado[];
+};
+
+export type HistoricoAlertaLinha = {
+  personId: number;
+  status: StatusKey;
+  totalDias: number;
+  matricula: string;
+  colaborador: string;
+  cargo: string;
+  posto: string;
+  empresa: string;
+  primeiroAtestado: string;
+  ultimoAtestado: string;
+  periodo: string;
+  janelaCriticaInicio: string;
+  janelaCriticaFim: string;
   atestados: Atestado[];
 };
 
