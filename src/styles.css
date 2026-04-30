@@ -114,6 +114,11 @@ button:disabled {
   margin-bottom: 22px;
 }
 
+.topbar-copy {
+  display: grid;
+  gap: 4px;
+}
+
 .eyebrow {
   margin: 0 0 4px;
   color: #5d6878;
@@ -128,6 +133,10 @@ button:disabled {
   align-items: flex-end;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.view-switch-wide {
+  grid-template-columns: repeat(3, minmax(170px, 1fr));
 }
 
 .icon-button {
@@ -371,6 +380,10 @@ button:disabled {
   margin: 0 16px 16px;
 }
 
+.report-section {
+  margin-bottom: 20px;
+}
+
 .report-card-header,
 .section-actions,
 .modal-actions {
@@ -531,12 +544,33 @@ button:disabled {
 .table-scroll-top {
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 8px 16px 0;
+  padding: 0 16px 8px;
+  cursor: grab;
+  scrollbar-width: thin;
+  scrollbar-color: #7a8796 #d9e0e8;
 }
 
 .table-scroll-top > div {
-  border-top: 6px solid #c8d2de;
+  height: 1px;
+}
+
+.table-scroll-top:active {
+  cursor: grabbing;
+}
+
+.table-scroll-top::-webkit-scrollbar {
+  height: 14px;
+}
+
+.table-scroll-top::-webkit-scrollbar-track {
   border-radius: 999px;
+  background: #d9e0e8;
+}
+
+.table-scroll-top::-webkit-scrollbar-thumb {
+  border: 3px solid #d9e0e8;
+  border-radius: 999px;
+  background: #7a8796;
 }
 
 .table-wrap {
@@ -547,7 +581,7 @@ button:disabled {
 
 table {
   width: 100%;
-  min-width: 1420px;
+  min-width: 1320px;
   border-collapse: collapse;
 }
 
@@ -615,45 +649,44 @@ td {
   font-weight: 900;
 }
 
-.afastamento-pill {
-  display: inline-flex;
-  min-width: 180px;
-  min-height: 28px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  padding: 0 12px;
-  font-size: 0.72rem;
-  font-weight: 900;
-}
-
-.afastamento-pill.lancado {
-  background: #dff2fb;
-  color: #0f5a74;
-}
-
-.afastamento-pill.pendente {
-  background: #ffedd5;
-  color: #9a3412;
-}
-
-.afastamento-pill.monitorando {
-  background: #e5f5e8;
-  color: #166534;
-}
-
 .colaborador-link {
-  display: inline-flex;
+  display: flex;
+  width: 100%;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   padding: 0;
   background: transparent;
   color: #176f8f;
   font-weight: 800;
+  text-align: left;
 }
 
 .colaborador-link:hover {
   color: #114f66;
+}
+
+.colaborador-copy {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.colaborador-badge {
+  display: inline-flex;
+  min-height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  border: 1px solid #bfd8e1;
+  border-radius: 999px;
+  background: #edf8ff;
+  color: #0f5a74;
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .cell-wrap {
@@ -802,6 +835,10 @@ td {
 
   .view-switch {
     width: 100%;
+    grid-template-columns: 1fr;
+  }
+
+  .view-switch-wide {
     grid-template-columns: 1fr;
   }
 

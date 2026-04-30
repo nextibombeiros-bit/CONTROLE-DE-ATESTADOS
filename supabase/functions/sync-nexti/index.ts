@@ -131,6 +131,9 @@ const corsHeaders = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RUNNING_SYNC_TIMEOUT_MINUTES = 20;
+const ATESTADO_NAME_PATTERN = /atestad/;
+const NON_ATESTADO_NAME_PATTERN =
+  /(ferias|falta|folga|abono|demiss|compens|dsr|matern|amament|nascimento|filho|patern|casament|luto|doac|comparec|eleitoral|adocao|aleitamento)/;
 const ALLOWED_NEXTI_READ_PATHS = [
   "/absences/lastupdate/",
   "/absencesituations/",
@@ -629,20 +632,27 @@ function normalizeText(value: string | null | undefined): string {
 }
 
 function isMedicalSituation(situation: NextiAbsenceSituation, filters: MedicalFilterConfig): boolean {
-  if (isNumber(situation.id) && filters.ids.has(situation.id)) return true;
-  if (typeof situation.externalId === "string" && filters.externalIds.has(situation.externalId)) return true;
-  if (filters.ids.size > 0 || filters.externalIds.size > 0) return false;
-
   const name = normalizeText(situation.name);
   const active = situation.active !== false;
   const justified = situation.absenceTypeId !== 2 && situation.absenceTypeId !== 3;
-  const hasMedicalFlags = Boolean(situation.cid || situation.medicalDoctor);
-  const looksMedicalByName = /(atest|medic|cid)/.test(name);
-  const looksNonMedicalByName = /(ferias|falta|folga|abono|demiss|compens|dsr|licenca patern|licenca casamento)/.test(
-    name,
-  );
+  const explicitMatch = (isNumber(situation.id) && filters.ids.has(situation.id)) ||
+    (typeof situation.externalId === "string" && filters.externalIds.has(situation.externalId));
+  const looksLikeAtestado = ATESTADO_NAME_PATTERN.test(name);
+  const looksExcluded = NON_ATESTADO_NAME_PATTERN.test(name);
 
-  return active && justified && !looksNonMedicalByName && (hasMedicalFlags || looksMedicalByName);
+  if (!active || !justified || looksExcluded) {
+    return false;
+  }
+
+  if (explicitMatch) {
+    return looksLikeAtestado;
+  }
+
+  if (filters.ids.size > 0 || filters.externalIds.size > 0) {
+    return false;
+  }
+
+  return looksLikeAtestado;
 }
 
 function resolveSituation(absence: NextiAbsence, situationIndex: SituationIndex): NextiAbsenceSituation | null {
@@ -656,22 +666,9 @@ function resolveSituation(absence: NextiAbsence, situationIndex: SituationIndex)
 }
 
 function matchesMedicalAbsence(absence: NextiAbsence, situationIndex: SituationIndex): boolean {
-  if (isNumber(absence.absenceSituationId) && situationIndex.filters.ids.has(absence.absenceSituationId)) return true;
-  if (
-    typeof absence.absenceSituationExternalId === "string" &&
-    situationIndex.filters.externalIds.has(absence.absenceSituationExternalId)
-  ) {
-    return true;
-  }
-
-  if (situationIndex.filters.ids.size > 0 || situationIndex.filters.externalIds.size > 0) {
-    return false;
-  }
-
   const situation = resolveSituation(absence, situationIndex);
   if (situation) return isMedicalSituation(situation, situationIndex.filters);
-
-  return Boolean(absence.cidCode || absence.medicalDoctorName || absence.medicalDoctorId);
+  return false;
 }
 
 async function fetchMedicalAbsences(
@@ -1040,7 +1037,7 @@ async function upsertPersons(
       empresa: resolveCompanyLabel(company, businessUnit, person),
       situacao: isNumber(person.personSituationId) ? situationLabel(person.personSituationId) : null,
       ultima_atualizacao: toTimestamp(person.lastUpdate),
-      ativo: person.personSituationId !== 3,
+      ativo: !isDismissedPerson(person),
       data_desligamento: toDateOnly(person.demissionDate),
       user_account_id_nexti: person.userAccountId ?? null,
       raw_json: person,
@@ -1179,6 +1176,13 @@ function firstNonEmpty(...values: Array<string | null | undefined>): string | nu
   }
 
   return null;
+}
+
+function isDismissedPerson(person: NextiPerson): boolean {
+  if (person.personSituationId === 3) return true;
+  const demissionDate = toDateOnly(person.demissionDate);
+  if (!demissionDate) return false;
+  return demissionDate <= new Date().toISOString().slice(0, 10);
 }
 
 function resolveCompanyLabel(

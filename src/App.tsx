@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import {
   AlertTriangle,
   BarChart3,
@@ -33,6 +33,7 @@ import type {
 } from "@/types.ts";
 
 type PeriodMode = "30" | "60" | "90" | "manual";
+type PageMode = "painel" | "relatorios";
 type ViewMode = "controle" | "historico";
 type LinhaSelecionavel = ControleLinha | HistoricoAlertaLinha;
 type StatusFilter = "todos" | StatusKey;
@@ -80,6 +81,7 @@ const sortOptions: Array<{ value: SortOption; label: string }> = [
 ];
 
 function App() {
+  const [pageMode, setPageMode] = useState<PageMode>("painel");
   const [viewMode, setViewMode] = useState<ViewMode>("controle");
   const [periodMode, setPeriodMode] = useState<PeriodMode>("60");
   const [startDate, setStartDate] = useState(startDateForPreset(60));
@@ -103,6 +105,7 @@ function App() {
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const tableTopScrollRef = useRef<HTMLDivElement | null>(null);
   const tableRef = useRef<HTMLTableElement | null>(null);
+  const topScrollDragRef = useRef<{ pointerId: number; startX: number; startScrollLeft: number } | null>(null);
 
   useEffect(() => {
     if (periodMode === "manual") return;
@@ -272,6 +275,17 @@ function App() {
     };
   }, [linhasContexto]);
 
+  const reportTotals = useMemo(() => {
+    return {
+      colaboradores: linhasVisiveis.length,
+      totalDias: linhasVisiveis.reduce((sum, line) => sum + line.totalDias, 0),
+      lancados: linhasVisiveis.filter((line) => line.afastamentoLancado).length,
+      pendentes: linhasVisiveis.filter((line) => line.afastamentoStatus === "pendente").length,
+      empresas: new Set(linhasVisiveis.map((line) => line.empresa).filter((value) => value && value !== "-")).size,
+      unidades: new Set(linhasVisiveis.map((line) => line.posto).filter((value) => value && value !== "-")).size,
+    };
+  }, [linhasVisiveis]);
+
   const personIdsVisiveis = useMemo(() => new Set(linhasVisiveis.map((line) => line.personId)), [linhasVisiveis]);
 
   const atestadosVisiveis = useMemo(() => {
@@ -317,6 +331,18 @@ function App() {
       lastMonths: 8,
     });
   }, [selected]);
+
+  const pageDescription = useMemo(() => {
+    if (pageMode === "relatorios") {
+      return viewMode === "controle"
+        ? `Relatorios e graficos com base no controle atual do periodo ${periodLabel(startDate, endDate)}`
+        : "Relatorios e graficos com base nos colaboradores ativos que ja atingiram 16 dias ou mais em uma janela de 60 dias";
+    }
+
+    return viewMode === "controle"
+      ? `Painel atual do periodo ${periodLabel(startDate, endDate)}`
+      : "Todos os colaboradores ativos que, em algum momento, ja atingiram 16 dias ou mais em uma janela de 60 dias";
+  }, [endDate, pageMode, startDate, viewMode]);
 
   useEffect(() => {
     const wrap = tableWrapRef.current;
@@ -374,6 +400,34 @@ function App() {
     };
   }, [linhasVisiveis.length, loading, viewMode]);
 
+  const handleTopScrollPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const element = tableTopScrollRef.current;
+    if (!element) return;
+    topScrollDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startScrollLeft: element.scrollLeft,
+    };
+    element.setPointerCapture(event.pointerId);
+  };
+
+  const handleTopScrollPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const element = tableTopScrollRef.current;
+    const state = topScrollDragRef.current;
+    if (!element || !state || state.pointerId !== event.pointerId) return;
+    element.scrollLeft = state.startScrollLeft + (event.clientX - state.startX);
+  };
+
+  const handleTopScrollPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const element = tableTopScrollRef.current;
+    const state = topScrollDragRef.current;
+    if (!element || !state || state.pointerId !== event.pointerId) return;
+    if (element.hasPointerCapture(event.pointerId)) {
+      element.releasePointerCapture(event.pointerId);
+    }
+    topScrollDragRef.current = null;
+  };
+
   if (!hasSupabaseConfig) {
     return (
       <main className="auth-layout">
@@ -389,35 +443,45 @@ function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div>
+        <div className="topbar-copy">
           <p className="eyebrow">RH / DP</p>
           <h1>Controle de Atestados</h1>
-          <p className="muted">
-            {viewMode === "controle"
-              ? `Painel atual do periodo ${periodLabel(startDate, endDate)}`
-              : "Todos os colaboradores ativos que, em algum momento, ja atingiram 16 dias ou mais em uma janela de 60 dias"}
-          </p>
+          <p className="muted">{pageDescription}</p>
+        </div>
+        <div className="topbar-actions">
+          <div className="view-switch view-switch-wide" aria-label="Navegacao principal">
+            <button
+              type="button"
+              className={pageMode === "painel" && viewMode === "controle" ? "active" : ""}
+              onClick={() => {
+                setPageMode("painel");
+                setViewMode("controle");
+              }}
+            >
+              Controle atual
+            </button>
+            <button
+              type="button"
+              className={pageMode === "painel" && viewMode === "historico" ? "active" : ""}
+              onClick={() => {
+                setPageMode("painel");
+                setViewMode("historico");
+              }}
+            >
+              Quem ja atingiu 16+ em 60 dias
+            </button>
+            <button
+              type="button"
+              className={pageMode === "relatorios" ? "active" : ""}
+              onClick={() => setPageMode("relatorios")}
+            >
+              RELATORIOS
+            </button>
+          </div>
         </div>
       </header>
 
       <section className="toolbar">
-        <div className="view-switch" aria-label="Visao">
-          <button
-            type="button"
-            className={viewMode === "controle" ? "active" : ""}
-            onClick={() => setViewMode("controle")}
-          >
-            Controle atual
-          </button>
-          <button
-            type="button"
-            className={viewMode === "historico" ? "active" : ""}
-            onClick={() => setViewMode("historico")}
-          >
-            Quem ja atingiu 16+ em 60 dias
-          </button>
-        </div>
-
         {viewMode === "controle" ? (
           <>
             <div className="segmented" aria-label="Periodo">
@@ -528,223 +592,295 @@ function App() {
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Buscar matricula, nome, cargo, unidade, empresa ou afastamento"
+            placeholder="Buscar matricula, nome, cargo, unidade ou empresa"
           />
         </label>
       </section>
 
       {error ? <div className="notice error">{error}</div> : null}
 
-      {viewMode === "controle" ? (
-        <section className="summary-grid summary-grid-large">
-          <article className="summary-card">
-            <span>Total com atestado medico</span>
-            <strong>{controleTotals.colaboradores}</strong>
-            <small>{periodLabel(startDate, endDate)}</small>
-          </article>
-          {summaryConfig.slice(0, 3).map(({ key, label, icon: Icon }) => (
-            <article className={`summary-card ${key}`} key={key}>
-              <span>{label}</span>
-              <strong>{controleTotals[key]}</strong>
-              <Icon size={20} />
-            </article>
-          ))}
-          <article className="summary-card pending">
-            <span>16+ sem afastamento</span>
-            <strong>{controleTotals.pendentes}</strong>
-            <small>Precisam de conferencia</small>
-          </article>
-          <article className="summary-card launched">
-            <span>Ja afastados no Nexti</span>
-            <strong>{controleTotals.lancados}</strong>
-            <small>Com INSS / processo identificado</small>
-          </article>
-        </section>
-      ) : (
-        <section className="summary-grid summary-grid-large">
-          <article className="summary-card alerta">
-            <span>Quem ja atingiu 16+ em 60 dias</span>
-            <strong>{historicoTotals.colaboradores}</strong>
-            <small>Historico completo dos ativos</small>
-          </article>
-          <article className="summary-card launched">
-            <span>Ja afastados no Nexti</span>
-            <strong>{historicoTotals.lancados}</strong>
-            <small>Com lancamento de afastamento identificado</small>
-          </article>
-          <article className="summary-card pending">
-            <span>Sem afastamento identificado</span>
-            <strong>{historicoTotals.pendentes}</strong>
-            <small>Atingiram 16+ e seguem sem marca clara</small>
-          </article>
-          <article className="summary-card">
-            <span>Maior pico em 60 dias</span>
-            <strong>{historicoTotals.maiorPico}</strong>
-            <small>Dias distintos dentro da janela critica</small>
-          </article>
-          <article className="summary-card">
-            <span>Empresas afetadas</span>
-            <strong>{historicoTotals.empresas}</strong>
-            <small>Dunamis, RB Facilities e Acaz</small>
-          </article>
-        </section>
-      )}
-
-      <section className="reports-grid">
-        <article className="report-card report-card-wide">
-          <div className="report-card-header">
-            <div>
-              <p className="eyebrow">Relatorio por periodo</p>
-              <h3>Evolucao mensal</h3>
-            </div>
-            <p className="muted">
-              {viewMode === "controle" ? periodLabel(startDate, endDate) : "Ultimos 12 meses dos colaboradores filtrados"}
-            </p>
-          </div>
-          <MonthlyBarsChart data={monthlyTrend} />
-        </article>
-
-        <article className="report-card">
-          <div className="report-card-header">
-            <div>
-              <p className="eyebrow">Controle de afastamento</p>
-              <h3>Situacao do grupo filtrado</h3>
-            </div>
-          </div>
-          <BreakdownList
-            items={[
-              {
-                label: "Ja afastados no Nexti",
-                value: linhasContexto.filter((line) => line.afastamentoStatus === "lancado").length,
-                tone: "lancado",
-              },
-              {
-                label: "16+ sem afastamento",
-                value: linhasContexto.filter((line) => line.afastamentoStatus === "pendente").length,
-                tone: "pendente",
-              },
-              {
-                label: "Monitorando",
-                value: linhasContexto.filter((line) => line.afastamentoStatus === "monitorando").length,
-                tone: "monitorando",
-              },
-            ]}
-          />
-        </article>
-
-        <article className="report-card">
-          <div className="report-card-header">
-            <div>
-              <p className="eyebrow">Empresas</p>
-              <h3>Maior concentracao de dias</h3>
-            </div>
-          </div>
-          <RankingBars items={rankingEmpresas} />
-        </article>
-
-        <article className="report-card">
-          <div className="report-card-header">
-            <div>
-              <p className="eyebrow">Unidades / postos</p>
-              <h3>Top unidades no recorte</h3>
-            </div>
-          </div>
-          <RankingBars items={rankingUnidades} />
-        </article>
-
-        <article className="report-card">
-          <div className="report-card-header">
-            <div>
-              <p className="eyebrow">Colaboradores</p>
-              <h3>Maiores acumulados</h3>
-            </div>
-          </div>
-          <RankingBars items={rankingColaboradores} />
-        </article>
-      </section>
-
-      <section className="table-section">
-        <div className="section-heading">
-          <div>
-            <h2>
-              {viewMode === "controle"
-                ? "Controle do periodo"
-                : "Historico de quem ja atingiu 16 dias ou mais em qualquer janela de 60 dias"}
-            </h2>
-            <p>
-              {loading ? "Carregando dados..." : `${linhasVisiveis.length} colaboradores encontrados`}
-              {syncLog ? ` | Base atualizada em ${formatDateTimeBR(syncLog.finalizado_em ?? syncLog.iniciado_em)}` : ""}
-            </p>
-          </div>
-          <div className="section-actions">
-            <button className="icon-button secondary" type="button" onClick={() => exportLinhasCsv(linhasVisiveis, viewMode)}>
-              <Download size={16} />
-              Exportar CSV
-            </button>
-          </div>
-        </div>
-
-        {tableScrollWidth > tableClientWidth ? (
-          <div className="table-scroll-top" ref={tableTopScrollRef}>
-            <div style={{ width: tableScrollWidth, height: 1 }} />
-          </div>
-        ) : null}
-
-        <div className="table-wrap" ref={tableWrapRef}>
-          <table ref={tableRef}>
-            <thead>
-              <tr>
-                <th>Status</th>
-                <th>Afastamento</th>
-                <th>Dias</th>
-                <th>Matricula</th>
-                <th>Colaborador</th>
-                <th>Empresa</th>
-                <th>Cargo</th>
-                <th>Unidade / posto</th>
-                <th>Primeiro</th>
-                <th>Ultimo</th>
-                <th>Periodo</th>
-              </tr>
-            </thead>
-            <tbody>
-              {linhasVisiveis.map((line) => (
-                <tr key={line.personId} className={`line-${line.afastamentoStatus}`}>
-                  <td>
-                    <span className={`status-pill ${line.status}`}>{statusLabels[line.status]}</span>
-                  </td>
-                  <td>
-                    <span className={`afastamento-pill ${line.afastamentoStatus}`}>{line.afastamentoLabel}</span>
-                  </td>
-                  <td className="days">{line.totalDias}</td>
-                  <td>{line.matricula}</td>
-                  <td className="cell-wrap cell-colaborador">
-                    <button className="colaborador-link" type="button" onClick={() => setSelected(line)}>
-                      <span>{line.colaborador}</span>
-                      <Eye size={14} />
-                    </button>
-                  </td>
-                  <td className="cell-wrap">{line.empresa}</td>
-                  <td className="cell-wrap">{line.cargo}</td>
-                  <td className="cell-wrap cell-posto">{line.posto}</td>
-                  <td>{formatDateBR(line.primeiroAtestado)}</td>
-                  <td>{formatDateBR(line.ultimoAtestado)}</td>
-                  <td>{line.periodo}</td>
-                </tr>
+      {pageMode === "painel" ? (
+        <>
+          {viewMode === "controle" ? (
+            <section className="summary-grid summary-grid-large">
+              <article className="summary-card">
+                <span>Total com atestado medico</span>
+                <strong>{controleTotals.colaboradores}</strong>
+                <small>{periodLabel(startDate, endDate)}</small>
+              </article>
+              {summaryConfig.slice(0, 3).map(({ key, label, icon: Icon }) => (
+                <article className={`summary-card ${key}`} key={key}>
+                  <span>{label}</span>
+                  <strong>{controleTotals[key]}</strong>
+                  <Icon size={20} />
+                </article>
               ))}
-              {!loading && linhasVisiveis.length === 0 ? (
-                <tr>
-                  <td colSpan={11} className="empty-state">
-                    {viewMode === "controle"
-                      ? "Nenhum atestado medico encontrado com os filtros atuais."
-                      : "Nenhum colaborador ativo atingiu 16 dias em uma janela de 60 dias com os filtros atuais."}
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
-      </section>
+              <article className="summary-card pending">
+                <span>16+ sem afastamento</span>
+                <strong>{controleTotals.pendentes}</strong>
+                <small>Precisam de conferencia</small>
+              </article>
+              <article className="summary-card launched">
+                <span>Ja afastados no Nexti</span>
+                <strong>{controleTotals.lancados}</strong>
+                <small>Com INSS / processo identificado</small>
+              </article>
+            </section>
+          ) : (
+            <section className="summary-grid summary-grid-large">
+              <article className="summary-card alerta">
+                <span>Quem ja atingiu 16+ em 60 dias</span>
+                <strong>{historicoTotals.colaboradores}</strong>
+                <small>Historico completo dos ativos</small>
+              </article>
+              <article className="summary-card launched">
+                <span>Ja afastados no Nexti</span>
+                <strong>{historicoTotals.lancados}</strong>
+                <small>Com lancamento de afastamento identificado</small>
+              </article>
+              <article className="summary-card pending">
+                <span>Sem afastamento identificado</span>
+                <strong>{historicoTotals.pendentes}</strong>
+                <small>Atingiram 16+ e seguem sem marca clara</small>
+              </article>
+              <article className="summary-card">
+                <span>Maior pico em 60 dias</span>
+                <strong>{historicoTotals.maiorPico}</strong>
+                <small>Dias distintos dentro da janela critica</small>
+              </article>
+              <article className="summary-card">
+                <span>Empresas afetadas</span>
+                <strong>{historicoTotals.empresas}</strong>
+                <small>Dunamis, RB Facilities e Acaz</small>
+              </article>
+            </section>
+          )}
+
+          <section className="table-section">
+            <div className="section-heading">
+              <div>
+                <h2>
+                  {viewMode === "controle"
+                    ? "Controle do periodo"
+                    : "Historico de quem ja atingiu 16 dias ou mais em qualquer janela de 60 dias"}
+                </h2>
+                <p>
+                  {loading ? "Carregando dados..." : `${linhasVisiveis.length} colaboradores encontrados`}
+                  {syncLog ? ` | Base atualizada em ${formatDateTimeBR(syncLog.finalizado_em ?? syncLog.iniciado_em)}` : ""}
+                </p>
+              </div>
+              <div className="section-actions">
+                <button
+                  className="icon-button secondary"
+                  type="button"
+                  onClick={() => exportLinhasCsv(linhasVisiveis, viewMode)}
+                >
+                  <Download size={16} />
+                  Exportar CSV
+                </button>
+              </div>
+            </div>
+
+            {tableScrollWidth > tableClientWidth ? (
+              <div
+                className="table-scroll-top"
+                ref={tableTopScrollRef}
+                onPointerDown={handleTopScrollPointerDown}
+                onPointerMove={handleTopScrollPointerMove}
+                onPointerUp={handleTopScrollPointerEnd}
+                onPointerCancel={handleTopScrollPointerEnd}
+              >
+                <div style={{ width: tableScrollWidth, height: 1 }} />
+              </div>
+            ) : null}
+
+            <div className="table-wrap" ref={tableWrapRef}>
+              <table ref={tableRef}>
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Dias</th>
+                    <th>Matricula</th>
+                    <th>Colaborador</th>
+                    <th>Empresa</th>
+                    <th>Cargo</th>
+                    <th>Unidade / posto</th>
+                    <th>Primeiro</th>
+                    <th>Ultimo</th>
+                    <th>Periodo</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {linhasVisiveis.map((line) => (
+                    <tr key={line.personId} className={`line-${line.afastamentoStatus}`}>
+                      <td>
+                        <span className={`status-pill ${line.status}`}>{statusLabels[line.status]}</span>
+                      </td>
+                      <td className="days">{line.totalDias}</td>
+                      <td>{line.matricula}</td>
+                      <td className="cell-wrap cell-colaborador">
+                        <button className="colaborador-link" type="button" onClick={() => setSelected(line)}>
+                          <span className="colaborador-copy">
+                            <span>{line.colaborador}</span>
+                            {line.afastamentoLancado ? <span className="colaborador-badge">Afastado</span> : null}
+                          </span>
+                          <Eye size={14} />
+                        </button>
+                      </td>
+                      <td className="cell-wrap">{line.empresa}</td>
+                      <td className="cell-wrap">{line.cargo}</td>
+                      <td className="cell-wrap cell-posto">{line.posto}</td>
+                      <td>{formatDateBR(line.primeiroAtestado)}</td>
+                      <td>{formatDateBR(line.ultimoAtestado)}</td>
+                      <td>{line.periodo}</td>
+                    </tr>
+                  ))}
+                  {!loading && linhasVisiveis.length === 0 ? (
+                    <tr>
+                      <td colSpan={10} className="empty-state">
+                        {viewMode === "controle"
+                          ? "Nenhum atestado medico encontrado com os filtros atuais."
+                          : "Nenhum colaborador ativo atingiu 16 dias em uma janela de 60 dias com os filtros atuais."}
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </>
+      ) : (
+        <>
+          <section className="summary-grid summary-grid-large">
+            <article className="summary-card">
+              <span>Colaboradores no recorte</span>
+              <strong>{reportTotals.colaboradores}</strong>
+              <small>{viewMode === "controle" ? periodLabel(startDate, endDate) : "Base historica 16+ em 60 dias"}</small>
+            </article>
+            <article className="summary-card alerta">
+              <span>Total de dias analisados</span>
+              <strong>{reportTotals.totalDias}</strong>
+              <small>Dias somados no conjunto filtrado</small>
+            </article>
+            <article className="summary-card launched">
+              <span>Ja afastados no Nexti</span>
+              <strong>{reportTotals.lancados}</strong>
+              <small>Com badge de afastamento no painel</small>
+            </article>
+            <article className="summary-card pending">
+              <span>16+ sem afastamento</span>
+              <strong>{reportTotals.pendentes}</strong>
+              <small>Necessitam conferencia operacional</small>
+            </article>
+            <article className="summary-card">
+              <span>Empresas no recorte</span>
+              <strong>{reportTotals.empresas}</strong>
+              <small>Organizacoes com ocorrencias filtradas</small>
+            </article>
+            <article className="summary-card">
+              <span>Unidades / postos</span>
+              <strong>{reportTotals.unidades}</strong>
+              <small>Locais com atestados no conjunto atual</small>
+            </article>
+          </section>
+
+          <section className="table-section report-section">
+            <div className="section-heading">
+              <div>
+                <h2>Relatorios e graficos</h2>
+                <p>
+                  {viewMode === "controle"
+                    ? `Base: controle atual de ${periodLabel(startDate, endDate)}`
+                    : "Base: colaboradores ativos que ja atingiram 16 dias ou mais em uma janela de 60 dias"}
+                </p>
+              </div>
+              <div className="section-actions">
+                <button
+                  className="icon-button secondary"
+                  type="button"
+                  onClick={() => exportLinhasCsv(linhasVisiveis, viewMode)}
+                >
+                  <Download size={16} />
+                  Exportar base filtrada
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section className="reports-grid">
+            <article className="report-card report-card-wide">
+              <div className="report-card-header">
+                <div>
+                  <p className="eyebrow">Relatorio por periodo</p>
+                  <h3>Evolucao mensal</h3>
+                </div>
+                <p className="muted">
+                  {viewMode === "controle" ? periodLabel(startDate, endDate) : "Ultimos 12 meses dos colaboradores filtrados"}
+                </p>
+              </div>
+              <MonthlyBarsChart data={monthlyTrend} />
+            </article>
+
+            <article className="report-card">
+              <div className="report-card-header">
+                <div>
+                  <p className="eyebrow">Controle de afastamento</p>
+                  <h3>Situacao do grupo filtrado</h3>
+                </div>
+              </div>
+              <BreakdownList
+                items={[
+                  {
+                    label: "Ja afastados no Nexti",
+                    value: linhasContexto.filter((line) => line.afastamentoStatus === "lancado").length,
+                    tone: "lancado",
+                  },
+                  {
+                    label: "16+ sem afastamento",
+                    value: linhasContexto.filter((line) => line.afastamentoStatus === "pendente").length,
+                    tone: "pendente",
+                  },
+                  {
+                    label: "Monitorando",
+                    value: linhasContexto.filter((line) => line.afastamentoStatus === "monitorando").length,
+                    tone: "monitorando",
+                  },
+                ]}
+              />
+            </article>
+
+            <article className="report-card">
+              <div className="report-card-header">
+                <div>
+                  <p className="eyebrow">Empresas</p>
+                  <h3>Maior concentracao de dias</h3>
+                </div>
+              </div>
+              <RankingBars items={rankingEmpresas} />
+            </article>
+
+            <article className="report-card">
+              <div className="report-card-header">
+                <div>
+                  <p className="eyebrow">Unidades / postos</p>
+                  <h3>Top unidades no recorte</h3>
+                </div>
+              </div>
+              <RankingBars items={rankingUnidades} />
+            </article>
+
+            <article className="report-card">
+              <div className="report-card-header">
+                <div>
+                  <p className="eyebrow">Colaboradores</p>
+                  <h3>Maiores acumulados</h3>
+                </div>
+              </div>
+              <RankingBars items={rankingColaboradores} />
+            </article>
+          </section>
+        </>
+      )}
 
       {selected ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setSelected(null)}>
@@ -1110,7 +1246,9 @@ async function fetchAllAtestados(): Promise<{ data: Atestado[] | null; error: Er
       return { data: null, error: new Error(error.message) };
     }
 
-    const chunk = (data ?? []) as Atestado[];
+    const chunk = ((data ?? []) as Atestado[]).filter((item) =>
+      item.colaboradores?.ativo === true && !item.colaboradores?.data_desligamento
+    );
     rows.push(...chunk);
 
     if (chunk.length < PAGE_SIZE) {
