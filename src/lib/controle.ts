@@ -1,4 +1,5 @@
 import type { Atestado, ControleLinha, HistoricoAlertaLinha } from "@/types.ts";
+import { buildAfastamentoInfo } from "@/lib/afastamento.ts";
 import { daysBetweenInclusive, periodLabel } from "@/lib/date.ts";
 import { statusForDays } from "@/lib/status.ts";
 
@@ -25,10 +26,12 @@ export function buildControle(atestados: Atestado[], periodStart: string, period
 
       const colaborador = sorted[0]?.colaboradores;
       const atestadosNoPeriodo = sorted.filter((item) => overlapsPeriod(item, periodStart, periodEnd));
+      const afastamento = buildAfastamentoInfo(colaborador?.cargo, colaborador?.posto, totalDias);
 
       return {
         personId,
         status: statusForDays(totalDias),
+        ...afastamento,
         totalDias,
         matricula: colaborador?.matricula ?? sorted[0]?.matricula ?? "-",
         colaborador: colaborador?.nome ?? `Colaborador ${personId}`,
@@ -61,10 +64,12 @@ export function buildHistoricoAlertas(atestados: Atestado[]): HistoricoAlertaLin
       const janelaCriticaInicio = peakWindow.start;
       const janelaCriticaFim = peakWindow.end;
       const atestadosDaJanela = sorted.filter((item) => overlapsPeriod(item, janelaCriticaInicio, janelaCriticaFim));
+      const afastamento = buildAfastamentoInfo(colaborador?.cargo, colaborador?.posto, peakWindow.totalDias);
 
       return {
         personId,
         status: statusForDays(peakWindow.totalDias),
+        ...afastamento,
         totalDias: peakWindow.totalDias,
         matricula: colaborador?.matricula ?? sorted[0]?.matricula ?? "-",
         colaborador: colaborador?.nome ?? `Colaborador ${personId}`,

@@ -1,26 +1,62 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  BarChart3,
+  Building2,
   CalendarDays,
   CheckCircle2,
+  Download,
   Eye,
+  Filter,
   Search,
   ShieldAlert,
+  Users,
 } from "lucide-react";
 import { supabase, hasSupabaseConfig } from "@/lib/supabase.ts";
 import { buildControle, buildHistoricoAlertas } from "@/lib/controle.ts";
+import { normalizeComparable } from "@/lib/afastamento.ts";
 import {
   formatDateBR,
+  formatDateTimeBR,
   periodLabel,
   startDateForPreset,
   todayInputValue,
 } from "@/lib/date.ts";
 import { statusLabels } from "@/lib/status.ts";
-import type { Atestado, ControleLinha, HistoricoAlertaLinha, Sincronizacao, StatusKey } from "@/types.ts";
+import type {
+  AfastamentoState,
+  Atestado,
+  ControleLinha,
+  HistoricoAlertaLinha,
+  Sincronizacao,
+  StatusKey,
+} from "@/types.ts";
 
 type PeriodMode = "30" | "60" | "90" | "manual";
 type ViewMode = "controle" | "historico";
 type LinhaSelecionavel = ControleLinha | HistoricoAlertaLinha;
+type StatusFilter = "todos" | StatusKey;
+type AfastamentoFilter = "todos" | "ocultar_lancados" | "somente_lancados" | "somente_pendentes";
+type SortOption =
+  | "dias_desc"
+  | "dias_asc"
+  | "nome_asc"
+  | "empresa_asc"
+  | "posto_asc"
+  | "primeiro_desc"
+  | "ultimo_desc";
+type RankingItem = {
+  label: string;
+  totalDias: number;
+  colaboradores: number;
+  afastados: number;
+};
+type MonthlyPoint = {
+  key: string;
+  label: string;
+  totalDias: number;
+  colaboradores: number;
+};
 
 const AUTO_SYNC_STALE_MS = 10 * 60 * 1000;
 const AUTO_SYNC_COOLDOWN_MS = 60 * 1000;
@@ -33,11 +69,26 @@ const summaryConfig: Array<{ key: StatusKey; label: string; icon: typeof AlertTr
   { key: "ok", label: "OK", icon: CheckCircle2 },
 ];
 
+const sortOptions: Array<{ value: SortOption; label: string }> = [
+  { value: "dias_desc", label: "Maior total de dias" },
+  { value: "dias_asc", label: "Menor total de dias" },
+  { value: "nome_asc", label: "Colaborador A-Z" },
+  { value: "empresa_asc", label: "Empresa A-Z" },
+  { value: "posto_asc", label: "Unidade / posto A-Z" },
+  { value: "primeiro_desc", label: "Primeiro atestado mais recente" },
+  { value: "ultimo_desc", label: "Ultimo atestado mais recente" },
+];
+
 function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("controle");
   const [periodMode, setPeriodMode] = useState<PeriodMode>("60");
   const [startDate, setStartDate] = useState(startDateForPreset(60));
   const [endDate, setEndDate] = useState(todayInputValue());
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("todos");
+  const [afastamentoFilter, setAfastamentoFilter] = useState<AfastamentoFilter>("todos");
+  const [empresaFilter, setEmpresaFilter] = useState("todas");
+  const [unidadeFilter, setUnidadeFilter] = useState("todas");
+  const [sortOption, setSortOption] = useState<SortOption>("dias_desc");
   const [atestados, setAtestados] = useState<Atestado[]>([]);
   const [syncLog, setSyncLog] = useState<Sincronizacao | null>(null);
   const [loading, setLoading] = useState(false);
@@ -45,8 +96,13 @@ function App() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<LinhaSelecionavel | null>(null);
+  const [tableScrollWidth, setTableScrollWidth] = useState(0);
+  const [tableClientWidth, setTableClientWidth] = useState(0);
   const reloadTimerRef = useRef<number | null>(null);
   const lastAutoSyncRequestRef = useRef(0);
+  const tableWrapRef = useRef<HTMLDivElement | null>(null);
+  const tableTopScrollRef = useRef<HTMLDivElement | null>(null);
+  const tableRef = useRef<HTMLTableElement | null>(null);
 
   useEffect(() => {
     if (periodMode === "manual") return;
@@ -159,46 +215,92 @@ function App() {
 
   const controle = useMemo(() => buildControle(atestados, startDate, endDate), [atestados, startDate, endDate]);
   const historicoAlertas = useMemo(() => buildHistoricoAlertas(atestados), [atestados]);
+  const linhasBase = viewMode === "controle" ? controle : historicoAlertas;
 
-  const filteredControle = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    if (!term) return controle;
-    return controle.filter((line) =>
-      [line.matricula, line.colaborador, line.cargo, line.posto, line.empresa].some((value) =>
-        value.toLowerCase().includes(term),
-      ),
-    );
-  }, [controle, search]);
+  const empresaOptions = useMemo(() => uniqueOptions(linhasBase.map((line) => line.empresa)), [linhasBase]);
+  const unidadeOptions = useMemo(() => uniqueOptions(linhasBase.map((line) => line.posto)), [linhasBase]);
 
-  const filteredHistorico = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    if (!term) return historicoAlertas;
-    return historicoAlertas.filter((line) =>
-      [line.matricula, line.colaborador, line.cargo, line.posto, line.empresa].some((value) =>
-        value.toLowerCase().includes(term),
-      ),
-    );
-  }, [historicoAlertas, search]);
+  const linhasContexto = useMemo(() => {
+    const term = normalizeComparable(search);
+    return linhasBase.filter((line) => {
+      if (empresaFilter !== "todas" && line.empresa !== empresaFilter) return false;
+      if (unidadeFilter !== "todas" && line.posto !== unidadeFilter) return false;
 
-  const totals = useMemo(() => {
+      if (afastamentoFilter === "ocultar_lancados" && line.afastamentoLancado) return false;
+      if (afastamentoFilter === "somente_lancados" && !line.afastamentoLancado) return false;
+      if (afastamentoFilter === "somente_pendentes" && line.afastamentoStatus !== "pendente") return false;
+
+      if (!term) return true;
+
+      return [
+        line.matricula,
+        line.colaborador,
+        line.cargo,
+        line.posto,
+        line.empresa,
+        line.afastamentoLabel,
+      ].some((value) => normalizeComparable(value).includes(term));
+    });
+  }, [afastamentoFilter, empresaFilter, linhasBase, search, unidadeFilter]);
+
+  const linhasVisiveis = useMemo(() => {
+    const filtradas = statusFilter === "todos"
+      ? linhasContexto
+      : linhasContexto.filter((line) => line.status === statusFilter);
+    return sortLinhas(filtradas, sortOption);
+  }, [linhasContexto, sortOption, statusFilter]);
+
+  const controleTotals = useMemo(() => {
     return {
-      colaboradores: controle.length,
-      alerta: controle.filter((line) => line.status === "alerta").length,
-      proximo: controle.filter((line) => line.status === "proximo").length,
-      atencao: controle.filter((line) => line.status === "atencao").length,
-      ok: controle.filter((line) => line.status === "ok").length,
+      colaboradores: linhasContexto.length,
+      alerta: linhasContexto.filter((line) => line.status === "alerta").length,
+      proximo: linhasContexto.filter((line) => line.status === "proximo").length,
+      atencao: linhasContexto.filter((line) => line.status === "atencao").length,
+      ok: linhasContexto.filter((line) => line.status === "ok").length,
+      lancados: linhasContexto.filter((line) => line.afastamentoLancado).length,
+      pendentes: linhasContexto.filter((line) => line.afastamentoStatus === "pendente").length,
     };
-  }, [controle]);
+  }, [linhasContexto]);
 
   const historicoTotals = useMemo(() => {
     return {
-      colaboradores: historicoAlertas.length,
-      maiorPico: historicoAlertas[0]?.totalDias ?? 0,
-      empresas: new Set(historicoAlertas.map((line) => line.empresa).filter((value) => value && value !== "-")).size,
+      colaboradores: linhasContexto.length,
+      lancados: linhasContexto.filter((line) => line.afastamentoLancado).length,
+      pendentes: linhasContexto.filter((line) => line.afastamentoStatus === "pendente").length,
+      maiorPico: linhasContexto[0]?.totalDias ?? 0,
+      empresas: new Set(linhasContexto.map((line) => line.empresa).filter((value) => value && value !== "-")).size,
     };
-  }, [historicoAlertas]);
+  }, [linhasContexto]);
 
-  const linhasVisiveis = viewMode === "controle" ? filteredControle : filteredHistorico;
+  const personIdsVisiveis = useMemo(() => new Set(linhasVisiveis.map((line) => line.personId)), [linhasVisiveis]);
+
+  const atestadosVisiveis = useMemo(() => {
+    return atestados.filter((item) => {
+      if (!personIdsVisiveis.has(item.person_id_nexti)) return false;
+      if (viewMode === "historico") return true;
+      return overlapsPeriod(item.data_inicio, item.data_fim, startDate, endDate);
+    });
+  }, [atestados, endDate, personIdsVisiveis, startDate, viewMode]);
+
+  const monthlyTrend = useMemo(() => {
+    return buildMonthlyPoints(
+      atestadosVisiveis,
+      viewMode === "controle" ? { start: startDate, end: endDate } : { lastMonths: 12 },
+    );
+  }, [atestadosVisiveis, endDate, startDate, viewMode]);
+
+  const rankingEmpresas = useMemo(() => buildRanking(linhasVisiveis, (line) => line.empresa, 8), [linhasVisiveis]);
+  const rankingUnidades = useMemo(() => buildRanking(linhasVisiveis, (line) => line.posto, 8), [linhasVisiveis]);
+  const rankingColaboradores = useMemo(
+    () =>
+      linhasVisiveis.slice(0, 8).map((line) => ({
+        label: line.colaborador,
+        totalDias: line.totalDias,
+        colaboradores: 1,
+        afastados: line.afastamentoLancado ? 1 : 0,
+      })),
+    [linhasVisiveis],
+  );
 
   const historicoSelecionado = useMemo(() => {
     if (!selected) return [];
@@ -206,6 +308,71 @@ function App() {
       (a, b) => b.data_inicio.localeCompare(a.data_inicio) || b.id_nexti - a.id_nexti,
     );
   }, [selected]);
+
+  const selectedMonthlyTrend = useMemo(() => {
+    if (!selected) return [];
+    return buildMonthlyPoints(selected.atestados, {
+      start: selected.primeiroAtestado,
+      end: selected.ultimoAtestado,
+      lastMonths: 8,
+    });
+  }, [selected]);
+
+  useEffect(() => {
+    const wrap = tableWrapRef.current;
+    const top = tableTopScrollRef.current;
+    if (!wrap || !top) return;
+
+    let syncingFromTop = false;
+    let syncingFromWrap = false;
+
+    const syncFromTop = () => {
+      if (syncingFromWrap) return;
+      syncingFromTop = true;
+      wrap.scrollLeft = top.scrollLeft;
+      syncingFromTop = false;
+    };
+
+    const syncFromWrap = () => {
+      if (syncingFromTop) return;
+      syncingFromWrap = true;
+      top.scrollLeft = wrap.scrollLeft;
+      syncingFromWrap = false;
+    };
+
+    top.addEventListener("scroll", syncFromTop);
+    wrap.addEventListener("scroll", syncFromWrap);
+
+    return () => {
+      top.removeEventListener("scroll", syncFromTop);
+      wrap.removeEventListener("scroll", syncFromWrap);
+    };
+  }, [linhasVisiveis.length, viewMode]);
+
+  useEffect(() => {
+    const wrap = tableWrapRef.current;
+    const table = tableRef.current;
+    if (!wrap || !table) return;
+
+    const measure = () => {
+      setTableClientWidth(wrap.clientWidth);
+      setTableScrollWidth(table.scrollWidth);
+      if (tableTopScrollRef.current) {
+        tableTopScrollRef.current.scrollLeft = wrap.scrollLeft;
+      }
+    };
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(wrap);
+    observer.observe(table);
+    window.addEventListener("resize", measure);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [linhasVisiveis.length, loading, viewMode]);
 
   if (!hasSupabaseConfig) {
     return (
@@ -225,6 +392,11 @@ function App() {
         <div>
           <p className="eyebrow">RH / DP</p>
           <h1>Controle de Atestados</h1>
+          <p className="muted">
+            {viewMode === "controle"
+              ? `Painel atual do periodo ${periodLabel(startDate, endDate)}`
+              : "Todos os colaboradores ativos que, em algum momento, ja atingiram 16 dias ou mais em uma janela de 60 dias"}
+          </p>
         </div>
       </header>
 
@@ -242,7 +414,7 @@ function App() {
             className={viewMode === "historico" ? "active" : ""}
             onClick={() => setViewMode("historico")}
           >
-            Historico 16+ / 60 dias
+            Quem ja atingiu 16+ em 60 dias
           </button>
         </div>
 
@@ -292,12 +464,71 @@ function App() {
           </>
         ) : null}
 
+        <label className="field-inline">
+          <Filter size={16} />
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}>
+            <option value="todos">Todos os status</option>
+            <option value="alerta">So 16+</option>
+            <option value="proximo">So 12 a 15</option>
+            <option value="atencao">So 8 a 11</option>
+            <option value="ok">So OK</option>
+          </select>
+        </label>
+
+        <label className="field-inline">
+          <ShieldAlert size={16} />
+          <select
+            value={afastamentoFilter}
+            onChange={(event) => setAfastamentoFilter(event.target.value as AfastamentoFilter)}
+          >
+            <option value="todos">Todos os afastamentos</option>
+            <option value="ocultar_lancados">Ocultar ja afastados</option>
+            <option value="somente_lancados">So ja afastados</option>
+            <option value="somente_pendentes">So 16+ sem afastamento</option>
+          </select>
+        </label>
+
+        <label className="field-inline">
+          <Building2 size={16} />
+          <select value={empresaFilter} onChange={(event) => setEmpresaFilter(event.target.value)}>
+            <option value="todas">Todas as empresas</option>
+            {empresaOptions.map((empresa) => (
+              <option key={empresa} value={empresa}>
+                {empresa}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="field-inline">
+          <BarChart3 size={16} />
+          <select value={unidadeFilter} onChange={(event) => setUnidadeFilter(event.target.value)}>
+            <option value="todas">Todas as unidades</option>
+            {unidadeOptions.map((unidade) => (
+              <option key={unidade} value={unidade}>
+                {unidade}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="field-inline">
+          <Users size={16} />
+          <select value={sortOption} onChange={(event) => setSortOption(event.target.value as SortOption)}>
+            {sortOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
         <label className="search-field">
           <Search size={16} />
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Buscar matricula, nome, cargo, posto ou empresa"
+            placeholder="Buscar matricula, nome, cargo, unidade, empresa ou afastamento"
           />
         </label>
       </section>
@@ -305,31 +536,51 @@ function App() {
       {error ? <div className="notice error">{error}</div> : null}
 
       {viewMode === "controle" ? (
-        <section className="summary-grid">
+        <section className="summary-grid summary-grid-large">
           <article className="summary-card">
             <span>Total com atestado medico</span>
-            <strong>{totals.colaboradores}</strong>
+            <strong>{controleTotals.colaboradores}</strong>
             <small>{periodLabel(startDate, endDate)}</small>
           </article>
           {summaryConfig.slice(0, 3).map(({ key, label, icon: Icon }) => (
             <article className={`summary-card ${key}`} key={key}>
               <span>{label}</span>
-              <strong>{totals[key]}</strong>
+              <strong>{controleTotals[key]}</strong>
               <Icon size={20} />
             </article>
           ))}
+          <article className="summary-card pending">
+            <span>16+ sem afastamento</span>
+            <strong>{controleTotals.pendentes}</strong>
+            <small>Precisam de conferencia</small>
+          </article>
+          <article className="summary-card launched">
+            <span>Ja afastados no Nexti</span>
+            <strong>{controleTotals.lancados}</strong>
+            <small>Com INSS / processo identificado</small>
+          </article>
         </section>
       ) : (
-        <section className="summary-grid summary-grid-historico">
+        <section className="summary-grid summary-grid-large">
           <article className="summary-card alerta">
-            <span>Ativos com historico 16+</span>
+            <span>Quem ja atingiu 16+ em 60 dias</span>
             <strong>{historicoTotals.colaboradores}</strong>
-            <small>Em qualquer janela movel de 60 dias</small>
+            <small>Historico completo dos ativos</small>
+          </article>
+          <article className="summary-card launched">
+            <span>Ja afastados no Nexti</span>
+            <strong>{historicoTotals.lancados}</strong>
+            <small>Com lancamento de afastamento identificado</small>
+          </article>
+          <article className="summary-card pending">
+            <span>Sem afastamento identificado</span>
+            <strong>{historicoTotals.pendentes}</strong>
+            <small>Atingiram 16+ e seguem sem marca clara</small>
           </article>
           <article className="summary-card">
             <span>Maior pico em 60 dias</span>
             <strong>{historicoTotals.maiorPico}</strong>
-            <small>Dias distintos de atestado</small>
+            <small>Dias distintos dentro da janela critica</small>
           </article>
           <article className="summary-card">
             <span>Empresas afetadas</span>
@@ -339,25 +590,118 @@ function App() {
         </section>
       )}
 
+      <section className="reports-grid">
+        <article className="report-card report-card-wide">
+          <div className="report-card-header">
+            <div>
+              <p className="eyebrow">Relatorio por periodo</p>
+              <h3>Evolucao mensal</h3>
+            </div>
+            <p className="muted">
+              {viewMode === "controle" ? periodLabel(startDate, endDate) : "Ultimos 12 meses dos colaboradores filtrados"}
+            </p>
+          </div>
+          <MonthlyBarsChart data={monthlyTrend} />
+        </article>
+
+        <article className="report-card">
+          <div className="report-card-header">
+            <div>
+              <p className="eyebrow">Controle de afastamento</p>
+              <h3>Situacao do grupo filtrado</h3>
+            </div>
+          </div>
+          <BreakdownList
+            items={[
+              {
+                label: "Ja afastados no Nexti",
+                value: linhasContexto.filter((line) => line.afastamentoStatus === "lancado").length,
+                tone: "lancado",
+              },
+              {
+                label: "16+ sem afastamento",
+                value: linhasContexto.filter((line) => line.afastamentoStatus === "pendente").length,
+                tone: "pendente",
+              },
+              {
+                label: "Monitorando",
+                value: linhasContexto.filter((line) => line.afastamentoStatus === "monitorando").length,
+                tone: "monitorando",
+              },
+            ]}
+          />
+        </article>
+
+        <article className="report-card">
+          <div className="report-card-header">
+            <div>
+              <p className="eyebrow">Empresas</p>
+              <h3>Maior concentracao de dias</h3>
+            </div>
+          </div>
+          <RankingBars items={rankingEmpresas} />
+        </article>
+
+        <article className="report-card">
+          <div className="report-card-header">
+            <div>
+              <p className="eyebrow">Unidades / postos</p>
+              <h3>Top unidades no recorte</h3>
+            </div>
+          </div>
+          <RankingBars items={rankingUnidades} />
+        </article>
+
+        <article className="report-card">
+          <div className="report-card-header">
+            <div>
+              <p className="eyebrow">Colaboradores</p>
+              <h3>Maiores acumulados</h3>
+            </div>
+          </div>
+          <RankingBars items={rankingColaboradores} />
+        </article>
+      </section>
+
       <section className="table-section">
         <div className="section-heading">
           <div>
-            <h2>{viewMode === "controle" ? "Controle" : "Historico 16+ em 60 dias"}</h2>
-            <p>{loading ? "Carregando dados..." : `${linhasVisiveis.length} colaboradores encontrados`}</p>
+            <h2>
+              {viewMode === "controle"
+                ? "Controle do periodo"
+                : "Historico de quem ja atingiu 16 dias ou mais em qualquer janela de 60 dias"}
+            </h2>
+            <p>
+              {loading ? "Carregando dados..." : `${linhasVisiveis.length} colaboradores encontrados`}
+              {syncLog ? ` | Base atualizada em ${formatDateTimeBR(syncLog.finalizado_em ?? syncLog.iniciado_em)}` : ""}
+            </p>
+          </div>
+          <div className="section-actions">
+            <button className="icon-button secondary" type="button" onClick={() => exportLinhasCsv(linhasVisiveis, viewMode)}>
+              <Download size={16} />
+              Exportar CSV
+            </button>
           </div>
         </div>
 
-        <div className="table-wrap">
-          <table>
+        {tableScrollWidth > tableClientWidth ? (
+          <div className="table-scroll-top" ref={tableTopScrollRef}>
+            <div style={{ width: tableScrollWidth, height: 1 }} />
+          </div>
+        ) : null}
+
+        <div className="table-wrap" ref={tableWrapRef}>
+          <table ref={tableRef}>
             <thead>
               <tr>
                 <th>Status</th>
+                <th>Afastamento</th>
                 <th>Dias</th>
                 <th>Matricula</th>
                 <th>Colaborador</th>
-                <th>Cargo</th>
-                <th>Posto</th>
                 <th>Empresa</th>
+                <th>Cargo</th>
+                <th>Unidade / posto</th>
                 <th>Primeiro</th>
                 <th>Ultimo</th>
                 <th>Periodo</th>
@@ -365,21 +709,24 @@ function App() {
             </thead>
             <tbody>
               {linhasVisiveis.map((line) => (
-                <tr key={line.personId}>
+                <tr key={line.personId} className={`line-${line.afastamentoStatus}`}>
                   <td>
                     <span className={`status-pill ${line.status}`}>{statusLabels[line.status]}</span>
                   </td>
+                  <td>
+                    <span className={`afastamento-pill ${line.afastamentoStatus}`}>{line.afastamentoLabel}</span>
+                  </td>
                   <td className="days">{line.totalDias}</td>
                   <td>{line.matricula}</td>
-                  <td>
+                  <td className="cell-wrap cell-colaborador">
                     <button className="colaborador-link" type="button" onClick={() => setSelected(line)}>
                       <span>{line.colaborador}</span>
                       <Eye size={14} />
                     </button>
                   </td>
-                  <td>{line.cargo}</td>
-                  <td>{line.posto}</td>
-                  <td>{line.empresa}</td>
+                  <td className="cell-wrap">{line.empresa}</td>
+                  <td className="cell-wrap">{line.cargo}</td>
+                  <td className="cell-wrap cell-posto">{line.posto}</td>
                   <td>{formatDateBR(line.primeiroAtestado)}</td>
                   <td>{formatDateBR(line.ultimoAtestado)}</td>
                   <td>{line.periodo}</td>
@@ -387,10 +734,10 @@ function App() {
               ))}
               {!loading && linhasVisiveis.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="empty-state">
+                  <td colSpan={11} className="empty-state">
                     {viewMode === "controle"
-                      ? "Nenhum atestado medico encontrado no periodo."
-                      : "Nenhum colaborador ativo atingiu 16 dias em uma janela de 60 dias."}
+                      ? "Nenhum atestado medico encontrado com os filtros atuais."
+                      : "Nenhum colaborador ativo atingiu 16 dias em uma janela de 60 dias com os filtros atuais."}
                   </td>
                 </tr>
               ) : null}
@@ -407,16 +754,57 @@ function App() {
                 <p className="eyebrow">{selected.matricula}</p>
                 <h2>{selected.colaborador}</h2>
                 <p className="muted">
-                  {selected.cargo} | {selected.posto} | {selected.empresa}
+                  {selected.empresa} | {selected.cargo} | {selected.posto}
                 </p>
-                {isHistoricoLinha(selected) ? (
-                  <p className="muted">Janela critica: {selected.periodo}</p>
-                ) : null}
+                <p className="muted">
+                  {selected.afastamentoLabel}
+                  {isHistoricoLinha(selected) ? ` | Janela critica: ${selected.periodo}` : ""}
+                </p>
               </div>
-              <button className="icon-only" type="button" onClick={() => setSelected(null)} aria-label="Fechar">
-                x
-              </button>
+              <div className="modal-actions">
+                <button
+                  className="icon-button secondary"
+                  type="button"
+                  onClick={() => exportHistoricoCsv(selected, historicoSelecionado)}
+                >
+                  <Download size={16} />
+                  Exportar historico
+                </button>
+                <button className="icon-only" type="button" onClick={() => setSelected(null)} aria-label="Fechar">
+                  x
+                </button>
+              </div>
             </div>
+
+            <div className="modal-summary-grid">
+              <article className="report-stat">
+                <span>Total de dias</span>
+                <strong>{selected.totalDias}</strong>
+              </article>
+              <article className="report-stat">
+                <span>Lancamentos detalhados</span>
+                <strong>{historicoSelecionado.length}</strong>
+              </article>
+              <article className="report-stat">
+                <span>Primeiro do recorte</span>
+                <strong>{formatDateBR(selected.primeiroAtestado)}</strong>
+              </article>
+              <article className="report-stat">
+                <span>Ultimo do recorte</span>
+                <strong>{formatDateBR(selected.ultimoAtestado)}</strong>
+              </article>
+            </div>
+
+            <section className="report-card report-card-modal">
+              <div className="report-card-header">
+                <div>
+                  <p className="eyebrow">Grafico individual</p>
+                  <h3>Dias por mes do colaborador</h3>
+                </div>
+              </div>
+              <MonthlyBarsChart data={selectedMonthlyTrend} compact />
+            </section>
+
             <div className="table-wrap compact">
               <table>
                 <thead>
@@ -439,13 +827,13 @@ function App() {
                       <td>{formatDateBR(item.data_inicio)}</td>
                       <td>{formatDateBR(item.data_fim)}</td>
                       <td className="days">{item.dias}</td>
-                      <td>{item.data_lancamento ? new Date(item.data_lancamento).toLocaleString("pt-BR") : "-"}</td>
+                      <td>{formatDateTimeBR(item.data_lancamento)}</td>
                       <td>{formatLancadoPor(item)}</td>
                       <td>{item.cid ?? "-"}</td>
                       <td>{item.medico ?? "-"}</td>
                       <td>{item.tipo_ausencia_nome ?? item.tipo_ausencia_id ?? item.tipo_ausencia_external_id ?? "-"}</td>
                       <td>{item.id_nexti}</td>
-                      <td>{item.observacao ?? "-"}</td>
+                      <td className="cell-wrap cell-observacao">{item.observacao ?? "-"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -471,6 +859,235 @@ function formatLancadoPor(item: Atestado): string {
   return item.lancado_por ?? "-";
 }
 
+function uniqueOptions(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.filter((value): value is string => Boolean(value && value !== "-")))).sort((a, b) =>
+    a.localeCompare(b),
+  );
+}
+
+function sortLinhas<T extends LinhaSelecionavel>(lines: T[], sortOption: SortOption): T[] {
+  const sorted = [...lines];
+
+  sorted.sort((a, b) => {
+    switch (sortOption) {
+      case "dias_asc":
+        return a.totalDias - b.totalDias || a.colaborador.localeCompare(b.colaborador);
+      case "nome_asc":
+        return a.colaborador.localeCompare(b.colaborador);
+      case "empresa_asc":
+        return a.empresa.localeCompare(b.empresa) || a.colaborador.localeCompare(b.colaborador);
+      case "posto_asc":
+        return a.posto.localeCompare(b.posto) || a.colaborador.localeCompare(b.colaborador);
+      case "primeiro_desc":
+        return b.primeiroAtestado.localeCompare(a.primeiroAtestado) || b.totalDias - a.totalDias;
+      case "ultimo_desc":
+        return b.ultimoAtestado.localeCompare(a.ultimoAtestado) || b.totalDias - a.totalDias;
+      case "dias_desc":
+      default:
+        return b.totalDias - a.totalDias || a.colaborador.localeCompare(b.colaborador);
+    }
+  });
+
+  return sorted;
+}
+
+function buildRanking(lines: LinhaSelecionavel[], pickLabel: (line: LinhaSelecionavel) => string, limit: number): RankingItem[] {
+  const grouped = new Map<string, RankingItem>();
+
+  for (const line of lines) {
+    const label = pickLabel(line) || "-";
+    const current = grouped.get(label) ?? { label, totalDias: 0, colaboradores: 0, afastados: 0 };
+    current.totalDias += line.totalDias;
+    current.colaboradores += 1;
+    current.afastados += line.afastamentoLancado ? 1 : 0;
+    grouped.set(label, current);
+  }
+
+  return Array.from(grouped.values())
+    .sort((a, b) => b.totalDias - a.totalDias || a.label.localeCompare(b.label))
+    .slice(0, limit);
+}
+
+function buildMonthlyPoints(
+  atestados: Atestado[],
+  options: { start?: string; end?: string; lastMonths?: number },
+): MonthlyPoint[] {
+  if (atestados.length === 0) return [];
+
+  const clampedDays = new Map<string, { totalDias: number; colaboradores: Set<number> }>();
+  let minMonthKey = "";
+  let maxMonthKey = "";
+
+  for (const atestado of atestados) {
+    const range = clampRangeByOptions(atestado.data_inicio, atestado.data_fim, options);
+    if (!range) continue;
+
+    let current = range.start;
+    while (current <= range.end) {
+      const key = current.slice(0, 7);
+      const currentMonth = clampedDays.get(key) ?? { totalDias: 0, colaboradores: new Set<number>() };
+      currentMonth.totalDias += 1;
+      currentMonth.colaboradores.add(atestado.person_id_nexti);
+      clampedDays.set(key, currentMonth);
+
+      if (!minMonthKey || key < minMonthKey) minMonthKey = key;
+      if (!maxMonthKey || key > maxMonthKey) maxMonthKey = key;
+      current = addOneDay(current);
+    }
+  }
+
+  if (!minMonthKey || !maxMonthKey) return [];
+
+  const allKeys = enumerateMonthKeys(minMonthKey, maxMonthKey);
+  const limitedKeys = options.lastMonths ? allKeys.slice(-options.lastMonths) : allKeys;
+
+  return limitedKeys.map((key) => {
+    const item = clampedDays.get(key);
+    return {
+      key,
+      label: formatMonthLabel(key),
+      totalDias: item?.totalDias ?? 0,
+      colaboradores: item?.colaboradores.size ?? 0,
+    };
+  });
+}
+
+function clampRangeByOptions(
+  start: string,
+  end: string,
+  options: { start?: string; end?: string },
+): { start: string; end: string } | null {
+  const rangeStart = options.start && start < options.start ? options.start : start;
+  const rangeEnd = options.end && end > options.end ? options.end : end;
+  return rangeStart <= rangeEnd ? { start: rangeStart, end: rangeEnd } : null;
+}
+
+function overlapsPeriod(itemStart: string, itemEnd: string, periodStart: string, periodEnd: string): boolean {
+  return itemStart <= periodEnd && itemEnd >= periodStart;
+}
+
+function addOneDay(value: string): string {
+  const date = new Date(`${value}T00:00:00`);
+  date.setDate(date.getDate() + 1);
+  return toDateOnly(date);
+}
+
+function toDateOnly(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function enumerateMonthKeys(startKey: string, endKey: string): string[] {
+  const keys: string[] = [];
+  let cursor = new Date(`${startKey}-01T00:00:00`);
+  const finish = new Date(`${endKey}-01T00:00:00`);
+
+  while (cursor <= finish) {
+    keys.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`);
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+  }
+
+  return keys;
+}
+
+function formatMonthLabel(key: string): string {
+  const [year, month] = key.split("-");
+  const date = new Date(Number(year), Number(month) - 1, 1);
+  return date.toLocaleDateString("pt-BR", { month: "short", year: "2-digit" });
+}
+
+function exportLinhasCsv(lines: LinhaSelecionavel[], viewMode: ViewMode) {
+  const headers = [
+    "Status",
+    "Afastamento",
+    "Dias",
+    "Matricula",
+    "Colaborador",
+    "Empresa",
+    "Cargo",
+    "Unidade/Posto",
+    "Primeiro",
+    "Ultimo",
+    "Periodo",
+  ];
+
+  const rows = lines.map((line) => [
+    statusLabels[line.status],
+    line.afastamentoLabel,
+    String(line.totalDias),
+    line.matricula,
+    line.colaborador,
+    line.empresa,
+    line.cargo,
+    line.posto,
+    formatDateBR(line.primeiroAtestado),
+    formatDateBR(line.ultimoAtestado),
+    line.periodo,
+  ]);
+
+  downloadCsv(
+    `${viewMode === "controle" ? "controle" : "historico-16-em-60"}-${new Date().toISOString().slice(0, 10)}.csv`,
+    headers,
+    rows,
+  );
+}
+
+function exportHistoricoCsv(selected: LinhaSelecionavel, items: Atestado[]) {
+  const headers = [
+    "Colaborador",
+    "Matricula",
+    "Afastamento",
+    "Data inicio",
+    "Data fim",
+    "Dias",
+    "Data lancamento",
+    "Lancado por",
+    "CID",
+    "Medico",
+    "Tipo",
+    "ID Nexti",
+    "Observacao",
+  ];
+
+  const rows = items.map((item) => [
+    selected.colaborador,
+    selected.matricula,
+    selected.afastamentoLabel,
+    formatDateBR(item.data_inicio),
+    formatDateBR(item.data_fim),
+    String(item.dias),
+    formatDateTimeBR(item.data_lancamento),
+    formatLancadoPor(item),
+    item.cid ?? "-",
+    item.medico ?? "-",
+    item.tipo_ausencia_nome ?? String(item.tipo_ausencia_id ?? item.tipo_ausencia_external_id ?? "-"),
+    String(item.id_nexti),
+    item.observacao ?? "-",
+  ]);
+
+  downloadCsv(`${slugify(selected.colaborador)}-historico.csv`, headers, rows);
+}
+
+function downloadCsv(filename: string, headers: string[], rows: string[][]) {
+  const csv = [headers, ...rows]
+    .map((row) => row.map((value) => `"${String(value ?? "").replace(/"/g, "\"\"")}"`).join(";"))
+    .join("\n");
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function slugify(value: string): string {
+  return normalizeComparable(value).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "relatorio";
+}
+
 async function fetchAllAtestados(): Promise<{ data: Atestado[] | null; error: Error | null }> {
   if (!supabase) {
     return { data: null, error: new Error("Supabase nao configurado") };
@@ -493,7 +1110,7 @@ async function fetchAllAtestados(): Promise<{ data: Atestado[] | null; error: Er
       return { data: null, error: new Error(error.message) };
     }
 
-    const chunk = ((data ?? []) as Atestado[]);
+    const chunk = (data ?? []) as Atestado[];
     rows.push(...chunk);
 
     if (chunk.length < PAGE_SIZE) {
@@ -504,4 +1121,86 @@ async function fetchAllAtestados(): Promise<{ data: Atestado[] | null; error: Er
   }
 
   return { data: rows, error: null };
+}
+
+function MonthlyBarsChart({ data, compact = false }: { data: MonthlyPoint[]; compact?: boolean }) {
+  const maxValue = Math.max(...data.map((item) => item.totalDias), 1);
+
+  if (data.length === 0) {
+    return <p className="muted">Sem dados suficientes para montar o grafico neste recorte.</p>;
+  }
+
+  return (
+    <div className={`monthly-chart ${compact ? "compact" : ""}`}>
+      {data.map((item) => (
+        <div className="monthly-bar" key={item.key}>
+          <span className="monthly-value">{item.totalDias}</span>
+          <div className="monthly-track">
+            <div className="monthly-fill" style={{ height: `${Math.max(8, (item.totalDias / maxValue) * 100)}%` }} />
+          </div>
+          <strong>{item.label}</strong>
+          <small>{item.colaboradores} colab.</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RankingBars({ items }: { items: RankingItem[] }) {
+  const maxValue = Math.max(...items.map((item) => item.totalDias), 1);
+
+  if (items.length === 0) {
+    return <p className="muted">Nenhum dado disponivel com os filtros atuais.</p>;
+  }
+
+  return (
+    <div className="ranking-list">
+      {items.map((item) => (
+        <div className="ranking-row" key={item.label}>
+          <div className="ranking-copy">
+            <strong>{item.label}</strong>
+            <small>
+              {item.colaboradores} colab. {item.afastados > 0 ? `| ${item.afastados} ja afastados` : ""}
+            </small>
+          </div>
+          <div className="ranking-bar-area">
+            <div className="ranking-bar-track">
+              <div className="ranking-bar-fill" style={{ width: `${(item.totalDias / maxValue) * 100}%` }} />
+            </div>
+            <span>{item.totalDias} dias</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BreakdownList({
+  items,
+}: {
+  items: Array<{ label: string; value: number; tone: AfastamentoState | "alerta" | "neutro" }>;
+}) {
+  const total = items.reduce((sum, item) => sum + item.value, 0) || 1;
+
+  return (
+    <div className="breakdown-list">
+      {items.map((item) => (
+        <div className="breakdown-row" key={item.label}>
+          <div>
+            <strong>{item.label}</strong>
+            <small>{item.value} colaboradores</small>
+          </div>
+          <div className="breakdown-meter">
+            <div className="breakdown-track">
+              <div
+                className={`breakdown-fill ${item.tone}`}
+                style={{ width: `${Math.max(8, (item.value / total) * 100)}%` }}
+              />
+            </div>
+            <span>{Math.round((item.value / total) * 100)}%</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }

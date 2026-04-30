@@ -1,4 +1,5 @@
 export type StatusKey = "alerta" | "proximo" | "atencao" | "ok";
+export type AfastamentoState = "lancado" | "pendente" | "monitorando";
 
 export type Colaborador = {
   id: string;
@@ -41,6 +42,9 @@ export type Atestado = {
 export type ControleLinha = {
   personId: number;
   status: StatusKey;
+  afastamentoLancado: boolean;
+  afastamentoStatus: AfastamentoState;
+  afastamentoLabel: string;
   totalDias: number;
   matricula: string;
   colaborador: string;
@@ -56,6 +60,9 @@ export type ControleLinha = {
 export type HistoricoAlertaLinha = {
   personId: number;
   status: StatusKey;
+  afastamentoLancado: boolean;
+  afastamentoStatus: AfastamentoState;
+  afastamentoLabel: string;
   totalDias: number;
   matricula: string;
   colaborador: string;
