@@ -1,5 +1,6 @@
 export type StatusKey = "alerta" | "proximo" | "atencao" | "ok";
 export type AfastamentoState = "lancado" | "pendente" | "monitorando";
+export type DateFilterMode = "periodo_atestado" | "data_lancamento";
 
 export type Colaborador = {
   id: string;
@@ -53,6 +54,7 @@ export type ControleLinha = {
   empresa: string;
   primeiroAtestado: string;
   ultimoAtestado: string;
+  ultimoLancamento: string | null;
   periodo: string;
   atestados: Atestado[];
 };
@@ -71,6 +73,7 @@ export type HistoricoAlertaLinha = {
   empresa: string;
   primeiroAtestado: string;
   ultimoAtestado: string;
+  ultimoLancamento: string | null;
   periodo: string;
   janelaCriticaInicio: string;
   janelaCriticaFim: string;

@@ -15,6 +15,7 @@
         "npm:react-dom@19",
         "npm:react@19",
         "npm:supabase@^2.95.6",
+        "npm:tsx@^4.21.0",
         "npm:typescript@^5.7.3",
         "npm:vite@^6.1.0"
       ]

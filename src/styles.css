@@ -666,6 +666,19 @@ td {
   color: #114f66;
 }
 
+.inline-link {
+  padding: 0;
+  background: transparent;
+  color: #176f8f;
+  font-weight: 800;
+  text-align: left;
+}
+
+.inline-link:hover {
+  color: #114f66;
+  text-decoration: underline;
+}
+
 .colaborador-copy {
   display: inline-flex;
   align-items: center;

@@ -123,6 +123,21 @@ type SyncWindow = {
   finish: Date;
 };
 
+type RecentSync = {
+  finishedAt: Date;
+  nextAllowedAt: Date;
+  cooldownMinutes: number;
+};
+
+type WriteStats = {
+  inserted: number;
+  updated: number;
+  skipped: number;
+  written: number;
+};
+
+type LookupValue = string | number;
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-sync-source",
@@ -131,6 +146,7 @@ const corsHeaders = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RUNNING_SYNC_TIMEOUT_MINUTES = 20;
+const DEFAULT_SYNC_MIN_INTERVAL_MINUTES = 60;
 const ATESTADO_NAME_PATTERN = /atestad/;
 const NON_ATESTADO_NAME_PATTERN =
   /(ferias|falta|folga|abono|demiss|compens|dsr|matern|amament|nascimento|filho|patern|casament|luto|doac|comparec|eleitoral|adocao|aleitamento)/;
@@ -145,6 +161,41 @@ const ALLOWED_NEXTI_READ_PATHS = [
   "/useraccounts/startdate/",
   "/workplaces/",
 ];
+
+const COLABORADOR_COMPARE_COLUMNS = [
+  "matricula",
+  "nome",
+  "cargo",
+  "posto",
+  "empresa",
+  "situacao",
+  "ultima_atualizacao",
+  "ativo",
+  "data_desligamento",
+  "user_account_id_nexti",
+];
+
+const ATESTADO_COMPARE_COLUMNS = [
+  "person_id_nexti",
+  "matricula",
+  "data_inicio",
+  "data_fim",
+  "dias",
+  "data_lancamento",
+  "lancado_por",
+  "cid",
+  "observacao",
+  "tipo_ausencia_id",
+  "tipo_ausencia_external_id",
+  "tipo_ausencia_nome",
+  "eh_atestado_medico",
+  "removido",
+  "lancado_por_id",
+  "lancado_por_nome",
+  "medico",
+];
+
+const TIMESTAMP_COMPARE_COLUMNS = new Set(["ultima_atualizacao", "data_lancamento"]);
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") {
@@ -169,12 +220,23 @@ Deno.serve(async (request) => {
 
   const body = await safeJson(request);
   const now = new Date();
-  const syncWindow = await resolveSyncWindow(admin, body, now);
-  const filterConfig = readMedicalFilters();
 
   if (await hasRunningSync(admin, now)) {
     return json({ skipped: true, reason: "Sincronizacao ja em execucao" }, 202);
   }
+
+  const recentSync = await findRecentSuccessfulSync(admin, now);
+  if (recentSync) {
+    return json({
+      skipped: true,
+      reason: `Ultima sincronizacao concluida ha menos de ${recentSync.cooldownMinutes} minutos`,
+      latestSyncAt: recentSync.finishedAt.toISOString(),
+      nextAllowedAt: recentSync.nextAllowedAt.toISOString(),
+    }, 202);
+  }
+
+  const syncWindow = await resolveSyncWindow(admin, body, now);
+  const filterConfig = readMedicalFilters();
 
   const { data: log, error: logError } = await admin
     .from("sincronizacoes")
@@ -205,8 +267,7 @@ Deno.serve(async (request) => {
       situationIndex,
     );
 
-    const trackedPersonIds = await fetchTrackedPersonIds(admin);
-    const relevantPersonIds = new Set<number>(trackedPersonIds);
+    const relevantPersonIds = new Set<number>();
     for (const absence of absences) {
       if (isNumber(absence.personId)) {
         relevantPersonIds.add(absence.personId);
@@ -216,23 +277,16 @@ Deno.serve(async (request) => {
     const personMap = relevantPersonIds.size > 0
       ? await fetchAllPersons(nextiBaseUrl, token, relevantPersonIds)
       : new Map<number, NextiPerson>();
-    const existingIds = await fetchExistingAbsenceIds(
-      admin,
-      absences.map((absence) => absence.id).filter(isNumber),
-    );
-
     const references = await fetchReferenceData(nextiBaseUrl, token, personMap);
-    const userMap = await fetchUserAccounts(nextiBaseUrl, token, now);
-    const operatorIds = await collectOperatorIds(admin, absences);
+    const operatorIds = collectOperatorIds(absences);
+    const userMap = operatorIds.size > 0 ? await fetchUserAccounts(nextiBaseUrl, token, now) : new Map<number, NextiUserAccount>();
     const operatorNames = await resolveOperatorNames(admin, operatorIds, userMap, personMap);
 
-    await upsertPersons(admin, absences, personMap, references);
-    await upsertAbsences(admin, absences, personMap, operatorNames, situationIndex);
-    await refreshExistingAbsenceMetadata(admin, situationIndex);
-    await refreshExistingUserNames(admin, operatorNames);
+    const personsWritten = await upsertPersons(admin, absences, personMap, references);
+    const absenceWriteStats = await upsertAbsences(admin, absences, personMap, operatorNames, situationIndex);
 
-    const imported = absences.filter((absence) => absence.id && !existingIds.has(absence.id)).length;
-    const updated = absences.length - imported;
+    const imported = absenceWriteStats.inserted;
+    const updated = absenceWriteStats.updated;
 
     await admin
       .from("sincronizacoes")
@@ -246,6 +300,9 @@ Deno.serve(async (request) => {
           source: request.headers.get("x-sync-source") ?? "http",
           skippedByFilter,
           absencesProcessed: absences.length,
+          absencesWritten: absenceWriteStats.written,
+          absencesSkippedUnchanged: absenceWriteStats.skipped,
+          personsWritten,
           personsLoaded: personMap.size,
           userAccountsLoaded: userMap.size,
           operatorNamesResolved: operatorNames.size,
@@ -337,6 +394,7 @@ async function resolveSyncWindow(
     return { automatic: false, start, finish };
   }
 
+  const automatic = body.automatic === true;
   const initialLookbackDays = readIntEnv("NEXTI_SYNC_INITIAL_LOOKBACK_DAYS", 365);
   const overlapMinutes = readIntEnv("NEXTI_SYNC_OVERLAP_MINUTES", 15);
   const { data, error } = await admin
@@ -354,17 +412,44 @@ async function resolveSyncWindow(
   const latestReference = parseInputDate(data?.periodo_fim ?? data?.finalizado_em ?? null);
   if (!latestReference) {
     return {
-      automatic: true,
+      automatic,
       start: new Date(now.getTime() - initialLookbackDays * DAY_MS),
       finish: now,
     };
   }
 
   return {
-    automatic: true,
+    automatic,
     start: new Date(latestReference.getTime() - overlapMinutes * 60 * 1000),
     finish: now,
   };
+}
+
+async function findRecentSuccessfulSync(admin: SupabaseAdmin, now: Date): Promise<RecentSync | null> {
+  const cooldownMinutes = Math.max(0, readIntEnv("NEXTI_SYNC_MIN_INTERVAL_MINUTES", DEFAULT_SYNC_MIN_INTERVAL_MINUTES));
+  if (cooldownMinutes === 0) return null;
+
+  const { data, error } = await admin
+    .from("sincronizacoes")
+    .select("finalizado_em, iniciado_em")
+    .eq("status", "sucesso")
+    .order("finalizado_em", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Erro ao consultar cooldown de sincronizacao: ${error.message}`);
+  }
+
+  const finishedAt = parseInputDate(data?.finalizado_em ?? data?.iniciado_em ?? null);
+  if (!finishedAt) return null;
+
+  const nextAllowedAt = new Date(finishedAt.getTime() + cooldownMinutes * 60 * 1000);
+  if (now < nextAllowedAt) {
+    return { finishedAt, nextAllowedAt, cooldownMinutes };
+  }
+
+  return null;
 }
 
 async function hasRunningSync(admin: SupabaseAdmin, now: Date): Promise<boolean> {
@@ -892,18 +977,13 @@ async function fetchUserAccounts(
   return userMap;
 }
 
-async function collectOperatorIds(admin: SupabaseAdmin, absences: NextiAbsence[]): Promise<Set<number>> {
+function collectOperatorIds(absences: NextiAbsence[]): Set<number> {
   const ids = new Set<number>();
 
   for (const absence of absences) {
     if (isNumber(absence.userRegisterId)) {
       ids.add(absence.userRegisterId);
     }
-  }
-
-  const unresolvedIds = await fetchUnresolvedOperatorIds(admin);
-  for (const id of unresolvedIds) {
-    ids.add(id);
   }
 
   return ids;
@@ -1011,12 +1091,103 @@ function readOperatorNameOverrides(): Map<number, string> {
   return map;
 }
 
+async function selectChangedRows(
+  admin: SupabaseAdmin,
+  table: "atestados" | "colaboradores",
+  keyColumn: string,
+  rows: Array<Record<string, unknown>>,
+  compareColumns: string[],
+): Promise<{ rows: Array<Record<string, unknown>> } & WriteStats> {
+  const changedRows: Array<Record<string, unknown>> = [];
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const chunk of chunkArray(rows, 500)) {
+    const keys = chunk.map((row) => row[keyColumn]).filter(isLookupValue);
+    const existingByKey = new Map<string, Record<string, unknown>>();
+
+    if (keys.length > 0) {
+      const { data, error } = await admin
+        .from(table)
+        .select([keyColumn, ...compareColumns].join(","))
+        .in(keyColumn, keys);
+
+      if (error) {
+        throw new Error(`Erro ao consultar registros existentes em ${table}: ${error.message}`);
+      }
+
+      for (const row of data ?? []) {
+        const typedRow = row as unknown as Record<string, unknown>;
+        const key = typedRow[keyColumn];
+        if (isLookupValue(key)) {
+          existingByKey.set(String(key), typedRow);
+        }
+      }
+    }
+
+    for (const row of chunk) {
+      const key = row[keyColumn];
+      if (!isLookupValue(key)) {
+        changedRows.push(row);
+        updated += 1;
+        continue;
+      }
+
+      const existing = existingByKey.get(String(key));
+      if (!existing) {
+        changedRows.push(row);
+        inserted += 1;
+        continue;
+      }
+
+      if (hasChangedColumns(existing, row, compareColumns)) {
+        changedRows.push(row);
+        updated += 1;
+      } else {
+        skipped += 1;
+      }
+    }
+  }
+
+  return { rows: changedRows, inserted, updated, skipped, written: changedRows.length };
+}
+
+function hasChangedColumns(existing: Record<string, unknown>, next: Record<string, unknown>, columns: string[]): boolean {
+  return columns.some((column) => !sameDbValue(existing[column], next[column], TIMESTAMP_COMPARE_COLUMNS.has(column)));
+}
+
+function sameDbValue(current: unknown, next: unknown, timestamp: boolean): boolean {
+  const currentValue = current ?? null;
+  const nextValue = next ?? null;
+
+  if (currentValue === null || nextValue === null) {
+    return currentValue === nextValue;
+  }
+
+  if (timestamp) {
+    const currentTime = new Date(String(currentValue)).getTime();
+    const nextTime = new Date(String(nextValue)).getTime();
+    return Number.isFinite(currentTime) && Number.isFinite(nextTime) && currentTime === nextTime;
+  }
+
+  if (typeof currentValue === "number" || typeof nextValue === "number") {
+    return Number(currentValue) === Number(nextValue);
+  }
+
+  return currentValue === nextValue;
+}
+
+function isLookupValue(value: unknown): value is LookupValue {
+  return (typeof value === "string" && value.length > 0) || isNumber(value);
+}
+
 async function upsertPersons(
   admin: SupabaseAdmin,
   absences: NextiAbsence[],
   personMap: Map<number, NextiPerson>,
   references: ReferenceData,
-) {
+): Promise<number> {
   const rowsByPersonId = new Map<number, Record<string, unknown>>();
 
   for (const person of personMap.values()) {
@@ -1062,10 +1233,20 @@ async function upsertPersons(
     });
   }
 
-  for (const rows of chunkArray(Array.from(rowsByPersonId.values()), 500)) {
+  const { rows: changedRows, written } = await selectChangedRows(
+    admin,
+    "colaboradores",
+    "person_id_nexti",
+    Array.from(rowsByPersonId.values()),
+    COLABORADOR_COMPARE_COLUMNS,
+  );
+
+  for (const rows of chunkArray(changedRows, 500)) {
     const { error } = await admin.from("colaboradores").upsert(rows, { onConflict: "person_id_nexti" });
     if (error) throw new Error(`Erro ao salvar colaboradores: ${error.message}`);
   }
+
+  return written;
 }
 
 async function upsertAbsences(
@@ -1074,7 +1255,7 @@ async function upsertAbsences(
   personMap: Map<number, NextiPerson>,
   operatorNames: Map<number, string>,
   situationIndex: SituationIndex,
-) {
+): Promise<WriteStats> {
   const rows = absences.flatMap((absence) => {
     if (!absence.id || !absence.personId || !absence.startDateTime) return [];
     const start = toDateOnly(absence.startDateTime);
@@ -1113,10 +1294,19 @@ async function upsertAbsences(
     }];
   });
 
-  for (const chunk of chunkArray(rows, 500)) {
+  const writeStats = await selectChangedRows(admin, "atestados", "id_nexti", rows, ATESTADO_COMPARE_COLUMNS);
+
+  for (const chunk of chunkArray(writeStats.rows, 500)) {
     const { error } = await admin.from("atestados").upsert(chunk, { onConflict: "id_nexti" });
     if (error) throw new Error(`Erro ao salvar atestados: ${error.message}`);
   }
+
+  return {
+    inserted: writeStats.inserted,
+    updated: writeStats.updated,
+    skipped: writeStats.skipped,
+    written: writeStats.written,
+  };
 }
 
 async function refreshExistingAbsenceMetadata(admin: SupabaseAdmin, situationIndex: SituationIndex) {

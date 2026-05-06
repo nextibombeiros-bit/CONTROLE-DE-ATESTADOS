@@ -1,32 +1,37 @@
-import type { Atestado, ControleLinha, HistoricoAlertaLinha } from "@/types.ts";
+import type { Atestado, ControleLinha, DateFilterMode, HistoricoAlertaLinha } from "@/types.ts";
 import { buildAfastamentoInfo } from "@/lib/afastamento.ts";
-import { daysBetweenInclusive, periodLabel } from "@/lib/date.ts";
+import { periodLabel } from "@/lib/date.ts";
 import { statusForDays } from "@/lib/status.ts";
 
 const ROLLING_WINDOW_DAYS = 60;
 const ALERT_THRESHOLD_DAYS = 16;
 
-export function buildControle(atestados: Atestado[], periodStart: string, periodEnd: string): ControleLinha[] {
+export function buildControle(
+  atestados: Atestado[],
+  periodStart: string,
+  periodEnd: string,
+  dateFilterMode: DateFilterMode = "periodo_atestado",
+): ControleLinha[] {
   return Array.from(groupAtestadosByPerson(atestados).entries())
     .map(([personId, items]) => {
       const sorted = sortAtestados(items);
-      const ranges = sorted
-        .map((item) => clampRange(item.data_inicio, item.data_fim, periodStart, periodEnd))
-        .filter((value): value is { start: string; end: string } => value !== null);
-      const mergedRanges = mergeRanges(ranges);
+      const atestadosNoPeriodo = sorted.filter((item) => matchesDateFilter(item, periodStart, periodEnd, dateFilterMode));
 
-      if (mergedRanges.length === 0) {
+      if (atestadosNoPeriodo.length === 0) {
         return null;
       }
 
-      const totalDias = mergedRanges.reduce((total, range) => total + daysBetweenInclusive(range.start, range.end), 0);
+      const ranges = atestadosNoPeriodo.map((item) => ({ start: item.data_inicio, end: item.data_fim }));
+      const mergedRanges = mergeRanges(ranges);
+      const totalDias = atestadosNoPeriodo.reduce((total, item) => total + item.dias, 0);
       if (totalDias <= 0) {
         return null;
       }
 
       const colaborador = sorted[0]?.colaboradores;
-      const atestadosNoPeriodo = sorted.filter((item) => overlapsPeriod(item, periodStart, periodEnd));
       const afastamento = buildAfastamentoInfo(colaborador?.cargo, colaborador?.posto, totalDias);
+      const primeiroAtestado = mergedRanges[0]?.start ?? atestadosNoPeriodo[0].data_inicio;
+      const ultimoAtestado = mergedRanges[mergedRanges.length - 1]?.end ?? atestadosNoPeriodo[atestadosNoPeriodo.length - 1].data_fim;
 
       return {
         personId,
@@ -38,8 +43,9 @@ export function buildControle(atestados: Atestado[], periodStart: string, period
         cargo: colaborador?.cargo ?? "-",
         posto: colaborador?.posto ?? "-",
         empresa: colaborador?.empresa ?? "-",
-        primeiroAtestado: mergedRanges[0].start,
-        ultimoAtestado: mergedRanges[mergedRanges.length - 1].end,
+        primeiroAtestado,
+        ultimoAtestado,
+        ultimoLancamento: latestLaunchDate(atestadosNoPeriodo),
         periodo: periodLabel(periodStart, periodEnd),
         atestados: atestadosNoPeriodo,
       } satisfies ControleLinha;
@@ -78,6 +84,7 @@ export function buildHistoricoAlertas(atestados: Atestado[]): HistoricoAlertaLin
         empresa: colaborador?.empresa ?? "-",
         primeiroAtestado: peakWindow.firstCoveredDay,
         ultimoAtestado: peakWindow.lastCoveredDay,
+        ultimoLancamento: latestLaunchDate(atestadosDaJanela),
         periodo: periodLabel(janelaCriticaInicio, janelaCriticaFim),
         janelaCriticaInicio,
         janelaCriticaFim,
@@ -113,15 +120,32 @@ function overlapsPeriod(item: Atestado, periodStart: string, periodEnd: string):
   return item.data_inicio <= periodEnd && item.data_fim >= periodStart;
 }
 
-function clampRange(
-  itemStart: string,
-  itemEnd: string,
+export function matchesDateFilter(
+  item: Atestado,
   periodStart: string,
   periodEnd: string,
-): { start: string; end: string } | null {
-  const start = itemStart > periodStart ? itemStart : periodStart;
-  const end = itemEnd < periodEnd ? itemEnd : periodEnd;
-  return start <= end ? { start, end } : null;
+  dateFilterMode: DateFilterMode,
+): boolean {
+  if (dateFilterMode === "data_lancamento") {
+    const launchDate = dateOnly(item.data_lancamento);
+    return Boolean(launchDate && launchDate >= periodStart && launchDate <= periodEnd);
+  }
+
+  return overlapsPeriod(item, periodStart, periodEnd);
+}
+
+function latestLaunchDate(items: Atestado[]): string | null {
+  return items.reduce<string | null>((latest, item) => {
+    const launchDate = dateOnly(item.data_lancamento);
+    if (!launchDate) return latest;
+    return !latest || launchDate > latest ? launchDate : latest;
+  }, null);
+}
+
+function dateOnly(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const [datePart] = value.split("T");
+  return /^\d{4}-\d{2}-\d{2}$/.test(datePart) ? datePart : null;
 }
 
 function mergeRanges(ranges: Array<{ start: string; end: string }>): Array<{ start: string; end: string }> {

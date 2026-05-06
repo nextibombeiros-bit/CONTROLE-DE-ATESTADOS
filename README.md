@@ -2,7 +2,7 @@
 
 Aplicacao para acompanhar colaboradores com 16 dias ou mais de atestados medicos dentro de um periodo movel, usando React/Vite, Supabase e sincronizacao com a API Nexti via Supabase Edge Function.
 
-O sistema agora considera apenas atestados medicos, exclui colaboradores desligados do painel e mantem o frontend em atualizacao automatica com sincronizacao recorrente no Supabase.
+O sistema considera apenas atestados medicos, exclui colaboradores desligados do painel e evita atualizacoes em segundo plano para reduzir consumo no Supabase.
 
 ## Escopo Nexti
 
@@ -66,15 +66,17 @@ Se esses filtros ficarem vazios, a funcao tentara identificar automaticamente ap
 
 O comportamento recomendado e deixar a funcao identificar automaticamente situacoes medicas pela propria configuracao da Nexti (`cid`, `medicalDoctor` e nome da situacao). Se o seu ambiente usar nomes ou flags fora do padrao, preencha os filtros acima para forcar somente os IDs corretos.
 
-Voce tambem pode ajustar a janela automatica:
+Voce tambem pode ajustar a janela automatica e o cooldown minimo entre sincronizacoes:
 
 ```bash
 supabase secrets set NEXTI_SYNC_INITIAL_LOOKBACK_DAYS="365"
 supabase secrets set NEXTI_SYNC_OVERLAP_MINUTES="15"
+supabase secrets set NEXTI_SYNC_MIN_INTERVAL_MINUTES="60"
 ```
 
 - `NEXTI_SYNC_INITIAL_LOOKBACK_DAYS`: periodo usado na primeira sincronizacao automatica, quando ainda nao existe historico de execucao.
 - `NEXTI_SYNC_OVERLAP_MINUTES`: folga de seguranca para nao perder atualizacoes entre uma execucao e outra.
+- `NEXTI_SYNC_MIN_INTERVAL_MINUTES`: intervalo minimo entre chamadas efetivas da Edge Function. O padrao e 60 minutos.
 
 ## Configuracao do frontend
 
@@ -106,12 +108,43 @@ As CLIs necessarias ficam instaladas no proprio projeto. Use os scripts abaixo:
 npm run supabase -- --version
 npm run deno:check
 npm run supabase:login
-npm run supabase:link
+npm run supabase:link:project
 npm run supabase:db:push
 npm run supabase:functions:deploy
 ```
 
-Depois de aplicar as migrations e publicar a function, a sincronizacao passa a rodar automaticamente a cada 5 minutos via `pg_cron` + `pg_net` no proprio Supabase.
+Depois de aplicar as migrations e publicar a function, a sincronizacao recorrente via `pg_cron` fica desligada por padrao. Use o botao "Sincronizar Nexti" no painel somente quando precisar atualizar a base com novos lancamentos.
+
+## Operacao em qualquer computador
+
+### Codespaces pelo navegador
+
+1. Abra o repositorio no GitHub.
+2. Use `Code` > `Codespaces` > `Create codespace on main`.
+3. Aguarde o devcontainer rodar `npm ci`.
+4. No terminal web, rode:
+
+```bash
+npm run dev
+npm run supabase:login
+npm run supabase:link:project
+```
+
+O Codespaces nao exige instalar VSCode, Git, Node ou Supabase CLI no computador do trabalho.
+
+### Codex ou VSCode instalado
+
+Clone o projeto e instale dependencias:
+
+```bash
+git clone https://github.com/nextibombeiros-bit/CONTROLE-DE-ATESTADOS.git
+cd CONTROLE-DE-ATESTADOS
+npm ci
+```
+
+No VSCode, use as tarefas em `Terminal` > `Run Task` para `dev`, `lint`, `build`, `deno:check`, `supabase:db:push` e `supabase:functions:deploy`.
+
+Nunca salve PAT, `SUPABASE_ACCESS_TOKEN`, `SUPABASE_SERVICE_ROLE_KEY` ou credenciais Nexti em arquivo. Use login pelo navegador quando possivel.
 
 ## Operacao local no Windows (PowerShell)
 
@@ -174,9 +207,13 @@ Depois ative Pages usando GitHub Actions. O workflow gera o build com base `/CON
 
 1. Acesse o site.
 2. Escolha o periodo: 30, 60, 90 dias ou intervalo manual.
-3. Aguarde a sincronizacao automatica da Nexti. Nao e necessario clicar em botao manual.
-4. A tabela mostra uma linha por colaborador, ordenada pelo maior total de dias distintos no periodo.
-5. Clique no nome do colaborador para abrir o historico detalhado de cada atestado.
+3. Escolha se as datas filtram pelo `Periodo do atestado` ou pela `Data de lancamento`.
+4. Ao abrir o site, os dados ja salvos no Supabase sao carregados uma vez.
+5. Use "Atualizar" para recarregar a base salva, sem chamar a Nexti.
+6. Use "Sincronizar Nexti" somente quando precisar buscar novos lancamentos na Nexti.
+7. A tabela mostra uma linha por colaborador; o total soma os dias informados nos lancamentos da Nexti dentro do filtro atual.
+8. Clique no nome do colaborador para abrir o historico detalhado de cada atestado.
+9. No historico, clique no operador em "Lancado por" para ver os lancamentos dele no filtro atual.
 
 O acesso ao dashboard esta sem login. As policies do Supabase permitem leitura publica das tabelas usadas pela tela.
 

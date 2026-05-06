@@ -8,10 +8,13 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit --pretty false",
+    "test": "npm run test:logic",
+    "test:logic": "tsx src/lib/controle.test.ts",
     "deno:check": "deno check supabase/functions/sync-nexti/index.ts",
     "supabase": "supabase",
     "supabase:login": "supabase login",
     "supabase:link": "supabase link",
+    "supabase:link:project": "supabase link --project-ref wzimpnedfceadlgolrqw",
     "supabase:db:push": "supabase db push",
     "supabase:functions:serve": "supabase functions serve sync-nexti --env-file .env",
     "supabase:functions:deploy": "supabase functions deploy sync-nexti"
@@ -28,6 +31,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "deno-bin": "^2.2.7",
     "supabase": "^2.95.6",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.3",
     "vite": "^6.1.0"
   }

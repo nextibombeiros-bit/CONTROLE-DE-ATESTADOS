@@ -8,12 +8,13 @@ import {
   Download,
   Eye,
   Filter,
+  RefreshCw,
   Search,
   ShieldAlert,
   Users,
 } from "lucide-react";
 import { supabase, hasSupabaseConfig } from "@/lib/supabase.ts";
-import { buildControle, buildHistoricoAlertas } from "@/lib/controle.ts";
+import { buildControle, buildHistoricoAlertas, matchesDateFilter } from "@/lib/controle.ts";
 import { normalizeComparable } from "@/lib/afastamento.ts";
 import {
   formatDateBR,
@@ -27,6 +28,7 @@ import type {
   AfastamentoState,
   Atestado,
   ControleLinha,
+  DateFilterMode,
   HistoricoAlertaLinha,
   Sincronizacao,
   StatusKey,
@@ -45,7 +47,8 @@ type SortOption =
   | "empresa_asc"
   | "posto_asc"
   | "primeiro_desc"
-  | "ultimo_desc";
+  | "ultimo_desc"
+  | "lancamento_desc";
 type RankingItem = {
   label: string;
   totalDias: number;
@@ -58,9 +61,11 @@ type MonthlyPoint = {
   totalDias: number;
   colaboradores: number;
 };
+type OperadorSelecionado = {
+  id: number;
+  nome: string;
+};
 
-const AUTO_SYNC_STALE_MS = 10 * 60 * 1000;
-const AUTO_SYNC_COOLDOWN_MS = 60 * 1000;
 const PAGE_SIZE = 1000;
 
 const summaryConfig: Array<{ key: StatusKey; label: string; icon: typeof AlertTriangle }> = [
@@ -78,6 +83,7 @@ const sortOptions: Array<{ value: SortOption; label: string }> = [
   { value: "posto_asc", label: "Unidade / posto A-Z" },
   { value: "primeiro_desc", label: "Primeiro atestado mais recente" },
   { value: "ultimo_desc", label: "Ultimo atestado mais recente" },
+  { value: "lancamento_desc", label: "Lancamento mais recente" },
 ];
 
 function App() {
@@ -86,6 +92,7 @@ function App() {
   const [periodMode, setPeriodMode] = useState<PeriodMode>("60");
   const [startDate, setStartDate] = useState(startDateForPreset(60));
   const [endDate, setEndDate] = useState(todayInputValue());
+  const [dateFilterMode, setDateFilterMode] = useState<DateFilterMode>("periodo_atestado");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("todos");
   const [afastamentoFilter, setAfastamentoFilter] = useState<AfastamentoFilter>("todos");
   const [empresaFilter, setEmpresaFilter] = useState("todas");
@@ -98,10 +105,9 @@ function App() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<LinhaSelecionavel | null>(null);
+  const [operadorSelecionado, setOperadorSelecionado] = useState<OperadorSelecionado | null>(null);
   const [tableScrollWidth, setTableScrollWidth] = useState(0);
   const [tableClientWidth, setTableClientWidth] = useState(0);
-  const reloadTimerRef = useRef<number | null>(null);
-  const lastAutoSyncRequestRef = useRef(0);
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const tableTopScrollRef = useRef<HTMLDivElement | null>(null);
   const tableRef = useRef<HTMLTableElement | null>(null);
@@ -133,7 +139,7 @@ function App() {
       setAtestados((atestadosData ?? []) as Atestado[]);
       setSyncLog(latestSync);
       if (latestSync?.status === "erro" && latestSync.erro) {
-        setError(`Falha na ultima sincronizacao automatica: ${latestSync.erro}`);
+        setError(`Falha na ultima sincronizacao: ${latestSync.erro}`);
       }
     }
 
@@ -141,13 +147,13 @@ function App() {
   }
 
   async function syncNexti() {
-    if (!supabase) return;
+    if (!supabase || syncing) return;
     setSyncing(true);
     setError("");
 
     const { error: syncError } = await supabase.functions.invoke("sync-nexti", {
       body: {
-        automatic: true,
+        automatic: false,
       },
     });
 
@@ -165,58 +171,10 @@ function App() {
     void loadData();
   }, []);
 
-  useEffect(() => {
-    const client = supabase;
-    if (!client) return;
-
-    const scheduleReload = () => {
-      if (reloadTimerRef.current) {
-        window.clearTimeout(reloadTimerRef.current);
-      }
-
-      reloadTimerRef.current = window.setTimeout(() => {
-        void loadData();
-      }, 800);
-    };
-
-    const channel = client
-      .channel("controle-atestados-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "atestados" }, scheduleReload)
-      .on("postgres_changes", { event: "*", schema: "public", table: "colaboradores" }, scheduleReload)
-      .on("postgres_changes", { event: "*", schema: "public", table: "sincronizacoes" }, scheduleReload)
-      .subscribe();
-
-    const intervalId = window.setInterval(() => {
-      void loadData();
-    }, 60_000);
-
-    return () => {
-      window.clearInterval(intervalId);
-      if (reloadTimerRef.current) {
-        window.clearTimeout(reloadTimerRef.current);
-      }
-      void client.removeChannel(channel);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!supabase || syncing) return;
-
-    const latestSyncReference = syncLog?.finalizado_em ?? syncLog?.iniciado_em ?? null;
-    const ageMs = latestSyncReference
-      ? Date.now() - new Date(latestSyncReference).getTime()
-      : Number.POSITIVE_INFINITY;
-    const cooldownElapsed = Date.now() - lastAutoSyncRequestRef.current > AUTO_SYNC_COOLDOWN_MS;
-
-    if (!cooldownElapsed) return;
-
-    if (!syncLog || (syncLog.status !== "em_execucao" && ageMs > AUTO_SYNC_STALE_MS)) {
-      lastAutoSyncRequestRef.current = Date.now();
-      void syncNexti();
-    }
-  }, [syncLog, syncing]);
-
-  const controle = useMemo(() => buildControle(atestados, startDate, endDate), [atestados, startDate, endDate]);
+  const controle = useMemo(
+    () => buildControle(atestados, startDate, endDate, dateFilterMode),
+    [atestados, dateFilterMode, endDate, startDate],
+  );
   const historicoAlertas = useMemo(() => buildHistoricoAlertas(atestados), [atestados]);
   const linhasBase = viewMode === "controle" ? controle : historicoAlertas;
 
@@ -292,9 +250,9 @@ function App() {
     return atestados.filter((item) => {
       if (!personIdsVisiveis.has(item.person_id_nexti)) return false;
       if (viewMode === "historico") return true;
-      return overlapsPeriod(item.data_inicio, item.data_fim, startDate, endDate);
+      return matchesDateFilter(item, startDate, endDate, dateFilterMode);
     });
-  }, [atestados, endDate, personIdsVisiveis, startDate, viewMode]);
+  }, [atestados, dateFilterMode, endDate, personIdsVisiveis, startDate, viewMode]);
 
   const monthlyTrend = useMemo(() => {
     return buildMonthlyPoints(
@@ -318,31 +276,37 @@ function App() {
 
   const historicoSelecionado = useMemo(() => {
     if (!selected) return [];
-    return [...selected.atestados].sort(
-      (a, b) => b.data_inicio.localeCompare(a.data_inicio) || b.id_nexti - a.id_nexti,
-    );
-  }, [selected]);
+    return sortAtestadosForDisplay(selected.atestados, dateFilterMode);
+  }, [dateFilterMode, selected]);
 
-  const selectedMonthlyTrend = useMemo(() => {
-    if (!selected) return [];
-    return buildMonthlyPoints(selected.atestados, {
-      start: selected.primeiroAtestado,
-      end: selected.ultimoAtestado,
-      lastMonths: 8,
-    });
-  }, [selected]);
+  const operadorLancamentos = useMemo(() => {
+    if (!operadorSelecionado) return [];
+
+    return sortAtestadosForDisplay(
+      atestados.filter(
+        (item) =>
+          item.lancado_por_id === operadorSelecionado.id &&
+          matchesDateFilter(item, startDate, endDate, dateFilterMode),
+      ),
+      dateFilterMode,
+    );
+  }, [atestados, dateFilterMode, endDate, operadorSelecionado, startDate]);
 
   const pageDescription = useMemo(() => {
+    const filterLabel = dateFilterMode === "data_lancamento"
+      ? `lancados de ${periodLabel(startDate, endDate)}`
+      : `do periodo ${periodLabel(startDate, endDate)}`;
+
     if (pageMode === "relatorios") {
       return viewMode === "controle"
-        ? `Relatorios e graficos com base no controle atual do periodo ${periodLabel(startDate, endDate)}`
+        ? `Relatorios e graficos com base no controle atual ${filterLabel}`
         : "Relatorios e graficos com base nos colaboradores ativos que ja atingiram 16 dias ou mais em uma janela de 60 dias";
     }
 
     return viewMode === "controle"
-      ? `Painel atual do periodo ${periodLabel(startDate, endDate)}`
+      ? `Painel atual ${filterLabel}`
       : "Todos os colaboradores ativos que, em algum momento, ja atingiram 16 dias ou mais em uma janela de 60 dias";
-  }, [endDate, pageMode, startDate, viewMode]);
+  }, [dateFilterMode, endDate, pageMode, startDate, viewMode]);
 
   useEffect(() => {
     const wrap = tableWrapRef.current;
@@ -525,6 +489,20 @@ function App() {
                 }}
               />
             </label>
+            <label className="field-inline">
+              <CalendarDays size={16} />
+              <select
+                value={dateFilterMode}
+                onChange={(event) => {
+                  const mode = event.target.value as DateFilterMode;
+                  setDateFilterMode(mode);
+                  setSortOption(mode === "data_lancamento" ? "lancamento_desc" : "dias_desc");
+                }}
+              >
+                <option value="periodo_atestado">Periodo do atestado</option>
+                <option value="data_lancamento">Data de lancamento</option>
+              </select>
+            </label>
           </>
         ) : null}
 
@@ -661,7 +639,9 @@ function App() {
               <div>
                 <h2>
                   {viewMode === "controle"
-                    ? "Controle do periodo"
+                    ? dateFilterMode === "data_lancamento"
+                      ? "Controle por data de lancamento"
+                      : "Controle do periodo"
                     : "Historico de quem ja atingiu 16 dias ou mais em qualquer janela de 60 dias"}
                 </h2>
                 <p>
@@ -670,6 +650,24 @@ function App() {
                 </p>
               </div>
               <div className="section-actions">
+                <button
+                  className="icon-button secondary"
+                  type="button"
+                  onClick={() => void loadData()}
+                  disabled={loading || syncing}
+                >
+                  <RefreshCw size={16} />
+                  {loading ? "Atualizando..." : "Atualizar"}
+                </button>
+                <button
+                  className="icon-button secondary"
+                  type="button"
+                  onClick={() => void syncNexti()}
+                  disabled={loading || syncing}
+                >
+                  <RefreshCw size={16} />
+                  {syncing ? "Sincronizando..." : "Sincronizar Nexti"}
+                </button>
                 <button
                   className="icon-button secondary"
                   type="button"
@@ -707,6 +705,7 @@ function App() {
                     <th>Unidade / posto</th>
                     <th>Primeiro</th>
                     <th>Ultimo</th>
+                    <th>Ultimo lancamento</th>
                     <th>Periodo</th>
                   </tr>
                 </thead>
@@ -732,12 +731,13 @@ function App() {
                       <td className="cell-wrap cell-posto">{line.posto}</td>
                       <td>{formatDateBR(line.primeiroAtestado)}</td>
                       <td>{formatDateBR(line.ultimoAtestado)}</td>
+                      <td>{formatDateBR(line.ultimoLancamento)}</td>
                       <td>{line.periodo}</td>
                     </tr>
                   ))}
                   {!loading && linhasVisiveis.length === 0 ? (
                     <tr>
-                      <td colSpan={10} className="empty-state">
+                      <td colSpan={11} className="empty-state">
                         {viewMode === "controle"
                           ? "Nenhum atestado medico encontrado com os filtros atuais."
                           : "Nenhum colaborador ativo atingiu 16 dias em uma janela de 60 dias com os filtros atuais."}
@@ -906,7 +906,15 @@ function App() {
                   <Download size={16} />
                   Exportar historico
                 </button>
-                <button className="icon-only" type="button" onClick={() => setSelected(null)} aria-label="Fechar">
+                <button
+                  className="icon-only"
+                  type="button"
+                  onClick={() => {
+                    setSelected(null);
+                    setOperadorSelecionado(null);
+                  }}
+                  aria-label="Fechar"
+                >
                   x
                 </button>
               </div>
@@ -931,16 +939,6 @@ function App() {
               </article>
             </div>
 
-            <section className="report-card report-card-modal">
-              <div className="report-card-header">
-                <div>
-                  <p className="eyebrow">Grafico individual</p>
-                  <h3>Dias por mes do colaborador</h3>
-                </div>
-              </div>
-              <MonthlyBarsChart data={selectedMonthlyTrend} compact />
-            </section>
-
             <div className="table-wrap compact">
               <table>
                 <thead>
@@ -958,20 +956,117 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {historicoSelecionado.map((item) => (
+                  {historicoSelecionado.map((item) => {
+                    const operador = getOperadorInfo(item);
+
+                    return (
+                      <tr key={item.id}>
+                        <td>{formatDateBR(item.data_inicio)}</td>
+                        <td>{formatDateBR(item.data_fim)}</td>
+                        <td className="days">{item.dias}</td>
+                        <td>{formatDateTimeBR(item.data_lancamento)}</td>
+                        <td>
+                          {operador ? (
+                            <button
+                              className="inline-link"
+                              type="button"
+                              onClick={() => setOperadorSelecionado(operador)}
+                            >
+                              {operador.nome}
+                            </button>
+                          ) : (
+                            formatLancadoPor(item)
+                          )}
+                        </td>
+                        <td>{item.cid ?? "-"}</td>
+                        <td>{item.medico ?? "-"}</td>
+                        <td>{item.tipo_ausencia_nome ?? item.tipo_ausencia_id ?? item.tipo_ausencia_external_id ?? "-"}</td>
+                        <td>{item.id_nexti}</td>
+                        <td className="cell-wrap cell-observacao">{item.observacao ?? "-"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {operadorSelecionado ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setOperadorSelecionado(null)}>
+          <section className="modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">Operador Nexti {operadorSelecionado.id}</p>
+                <h2>{operadorSelecionado.nome}</h2>
+                <p className="muted">
+                  Lancamentos no filtro atual: {dateFilterMode === "data_lancamento" ? "data de lancamento" : "periodo do atestado"} |{" "}
+                  {periodLabel(startDate, endDate)}
+                </p>
+              </div>
+              <button className="icon-only" type="button" onClick={() => setOperadorSelecionado(null)} aria-label="Fechar">
+                x
+              </button>
+            </div>
+
+            <div className="modal-summary-grid">
+              <article className="report-stat">
+                <span>Lancamentos</span>
+                <strong>{operadorLancamentos.length}</strong>
+              </article>
+              <article className="report-stat">
+                <span>Total de dias</span>
+                <strong>{operadorLancamentos.reduce((sum, item) => sum + item.dias, 0)}</strong>
+              </article>
+              <article className="report-stat">
+                <span>Colaboradores</span>
+                <strong>{new Set(operadorLancamentos.map((item) => item.person_id_nexti)).size}</strong>
+              </article>
+              <article className="report-stat">
+                <span>Periodo</span>
+                <strong>{periodLabel(startDate, endDate)}</strong>
+              </article>
+            </div>
+
+            <div className="table-wrap compact">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Colaborador</th>
+                    <th>Matricula</th>
+                    <th>Inicio</th>
+                    <th>Fim</th>
+                    <th>Dias</th>
+                    <th>Lancamento</th>
+                    <th>CID</th>
+                    <th>Medico</th>
+                    <th>Tipo</th>
+                    <th>ID Nexti</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {operadorLancamentos.map((item) => (
                     <tr key={item.id}>
+                      <td className="cell-wrap cell-colaborador">{item.colaboradores?.nome ?? `Colaborador ${item.person_id_nexti}`}</td>
+                      <td>{item.colaboradores?.matricula ?? item.matricula ?? "-"}</td>
                       <td>{formatDateBR(item.data_inicio)}</td>
                       <td>{formatDateBR(item.data_fim)}</td>
                       <td className="days">{item.dias}</td>
                       <td>{formatDateTimeBR(item.data_lancamento)}</td>
-                      <td>{formatLancadoPor(item)}</td>
                       <td>{item.cid ?? "-"}</td>
                       <td>{item.medico ?? "-"}</td>
                       <td>{item.tipo_ausencia_nome ?? item.tipo_ausencia_id ?? item.tipo_ausencia_external_id ?? "-"}</td>
                       <td>{item.id_nexti}</td>
-                      <td className="cell-wrap cell-observacao">{item.observacao ?? "-"}</td>
                     </tr>
                   ))}
+                  {operadorLancamentos.length === 0 ? (
+                    <tr>
+                      <td colSpan={10} className="empty-state">
+                        Nenhum lancamento encontrado para este operador no filtro atual.
+                      </td>
+                    </tr>
+                  ) : null}
                 </tbody>
               </table>
             </div>
@@ -993,6 +1088,14 @@ function formatLancadoPor(item: Atestado): string {
   if (item.lancado_por && /\D/.test(item.lancado_por)) return item.lancado_por;
   if (typeof item.lancado_por_id === "number") return `Operador Nexti ${item.lancado_por_id}`;
   return item.lancado_por ?? "-";
+}
+
+function getOperadorInfo(item: Atestado): OperadorSelecionado | null {
+  if (typeof item.lancado_por_id !== "number") return null;
+  return {
+    id: item.lancado_por_id,
+    nome: formatLancadoPor(item),
+  };
 }
 
 function uniqueOptions(values: Array<string | null | undefined>): string[] {
@@ -1018,6 +1121,8 @@ function sortLinhas<T extends LinhaSelecionavel>(lines: T[], sortOption: SortOpt
         return b.primeiroAtestado.localeCompare(a.primeiroAtestado) || b.totalDias - a.totalDias;
       case "ultimo_desc":
         return b.ultimoAtestado.localeCompare(a.ultimoAtestado) || b.totalDias - a.totalDias;
+      case "lancamento_desc":
+        return compareNullableDatesDesc(a.ultimoLancamento, b.ultimoLancamento) || b.totalDias - a.totalDias;
       case "dias_desc":
       default:
         return b.totalDias - a.totalDias || a.colaborador.localeCompare(b.colaborador);
@@ -1025,6 +1130,22 @@ function sortLinhas<T extends LinhaSelecionavel>(lines: T[], sortOption: SortOpt
   });
 
   return sorted;
+}
+
+function sortAtestadosForDisplay(items: Atestado[], dateFilterMode: DateFilterMode): Atestado[] {
+  return [...items].sort((a, b) => {
+    if (dateFilterMode === "data_lancamento") {
+      return compareNullableDatesDesc(a.data_lancamento, b.data_lancamento) || b.id_nexti - a.id_nexti;
+    }
+
+    return b.data_inicio.localeCompare(a.data_inicio) || b.id_nexti - a.id_nexti;
+  });
+}
+
+function compareNullableDatesDesc(left: string | null | undefined, right: string | null | undefined): number {
+  const leftValue = left ?? "";
+  const rightValue = right ?? "";
+  return rightValue.localeCompare(leftValue);
 }
 
 function buildRanking(lines: LinhaSelecionavel[], pickLabel: (line: LinhaSelecionavel) => string, limit: number): RankingItem[] {
@@ -1098,10 +1219,6 @@ function clampRangeByOptions(
   return rangeStart <= rangeEnd ? { start: rangeStart, end: rangeEnd } : null;
 }
 
-function overlapsPeriod(itemStart: string, itemEnd: string, periodStart: string, periodEnd: string): boolean {
-  return itemStart <= periodEnd && itemEnd >= periodStart;
-}
-
 function addOneDay(value: string): string {
   const date = new Date(`${value}T00:00:00`);
   date.setDate(date.getDate() + 1);
@@ -1146,6 +1263,7 @@ function exportLinhasCsv(lines: LinhaSelecionavel[], viewMode: ViewMode) {
     "Unidade/Posto",
     "Primeiro",
     "Ultimo",
+    "Ultimo lancamento",
     "Periodo",
   ];
 
@@ -1160,6 +1278,7 @@ function exportLinhasCsv(lines: LinhaSelecionavel[], viewMode: ViewMode) {
     line.posto,
     formatDateBR(line.primeiroAtestado),
     formatDateBR(line.ultimoAtestado),
+    formatDateBR(line.ultimoLancamento),
     line.periodo,
   ]);
 
@@ -1235,10 +1354,45 @@ async function fetchAllAtestados(): Promise<{ data: Atestado[] | null; error: Er
   while (true) {
     const { data, error } = await supabase
       .from("atestados")
-      .select("*, colaboradores!inner(*)")
+      .select(`
+        id,
+        id_nexti,
+        person_id_nexti,
+        matricula,
+        data_inicio,
+        data_fim,
+        dias,
+        data_lancamento,
+        lancado_por,
+        cid,
+        observacao,
+        tipo_ausencia_id,
+        tipo_ausencia_external_id,
+        tipo_ausencia_nome,
+        eh_atestado_medico,
+        removido,
+        lancado_por_id,
+        lancado_por_nome,
+        medico,
+        colaboradores!inner (
+          id,
+          person_id_nexti,
+          matricula,
+          nome,
+          cargo,
+          posto,
+          empresa,
+          situacao,
+          ultima_atualizacao,
+          ativo,
+          data_desligamento,
+          user_account_id_nexti
+        )
+      `)
       .eq("removido", false)
       .eq("eh_atestado_medico", true)
       .eq("colaboradores.ativo", true)
+      .is("colaboradores.data_desligamento", null)
       .order("data_inicio", { ascending: false })
       .range(from, from + PAGE_SIZE - 1);
 
@@ -1246,9 +1400,7 @@ async function fetchAllAtestados(): Promise<{ data: Atestado[] | null; error: Er
       return { data: null, error: new Error(error.message) };
     }
 
-    const chunk = ((data ?? []) as Atestado[]).filter((item) =>
-      item.colaboradores?.ativo === true && !item.colaboradores?.data_desligamento
-    );
+    const chunk = (data ?? []) as unknown as Atestado[];
     rows.push(...chunk);
 
     if (chunk.length < PAGE_SIZE) {
