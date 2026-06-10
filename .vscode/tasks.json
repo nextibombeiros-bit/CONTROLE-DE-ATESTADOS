@@ -9,34 +9,29 @@
       "problemMatcher": []
     },
     {
+      "label": "dev:server",
+      "type": "npm",
+      "script": "dev:server",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
       "label": "lint",
       "type": "npm",
       "script": "lint",
       "problemMatcher": "$tsc"
     },
     {
+      "label": "test",
+      "type": "npm",
+      "script": "test",
+      "problemMatcher": []
+    },
+    {
       "label": "build",
       "type": "npm",
       "script": "build",
       "problemMatcher": "$tsc"
-    },
-    {
-      "label": "deno:check",
-      "type": "npm",
-      "script": "deno:check",
-      "problemMatcher": "$tsc"
-    },
-    {
-      "label": "supabase:db:push",
-      "type": "npm",
-      "script": "supabase:db:push",
-      "problemMatcher": []
-    },
-    {
-      "label": "supabase:functions:deploy",
-      "type": "npm",
-      "script": "supabase:functions:deploy",
-      "problemMatcher": []
     }
   ]
 }

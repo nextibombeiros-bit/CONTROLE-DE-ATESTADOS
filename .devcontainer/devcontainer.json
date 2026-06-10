@@ -1,20 +1,23 @@
 {
   "name": "Controle de Atestados",
   "image": "mcr.microsoft.com/devcontainers/typescript-node:1-22-bookworm",
-  "postCreateCommand": "npm ci && npm run supabase -- --version",
-  "forwardPorts": [5173],
+  "postCreateCommand": "npm ci",
+  "forwardPorts": [5173, 3000],
   "portsAttributes": {
     "5173": {
       "label": "Vite",
       "onAutoForward": "openPreview"
+    },
+    "3000": {
+      "label": "Controle API",
+      "onAutoForward": "notify"
     }
   },
   "customizations": {
     "vscode": {
       "extensions": [
         "dbaeumer.vscode-eslint",
-        "esbenp.prettier-vscode",
-        "Supabase.supabase-vscode"
+        "esbenp.prettier-vscode"
       ]
     }
   }

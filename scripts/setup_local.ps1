@@ -28,7 +28,13 @@ function Invoke-Git {
 
 Assert-Command git
 Assert-Command node
-Assert-Command npm
+$NpmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+if (-not $NpmCommand) {
+  $NpmCommand = Get-Command npm -ErrorAction SilentlyContinue
+}
+if (-not $NpmCommand) {
+  throw "Comando obrigatorio nao encontrado: npm"
+}
 
 & git rev-parse --is-inside-work-tree | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -50,7 +56,7 @@ Write-Host "Usuario Git atual: $(git config user.name) <$(git config user.email)
 Write-Host "Remote origin: $(git remote get-url origin)"
 
 if (-not $SkipInstall) {
-  & npm ci
+  & $NpmCommand.Source ci
   if ($LASTEXITCODE -ne 0) {
     throw "Falha ao instalar dependencias com npm ci."
   }

@@ -2,19 +2,18 @@
 
 ## Ambiente
 - Use Node 22 e rode `npm ci` antes de desenvolver.
-- No Codespaces, o devcontainer instala dependencias automaticamente.
-- O projeto Supabase oficial e `wzimpnedfceadlgolrqw`.
+- O projeto nao usa mais Supabase. A stack atual e React/Vite + Node/Express + PostgreSQL.
+- O deploy de producao fica no Hostinger KVM via Docker Compose.
 
 ## Comandos
-- `npm run dev`: abre o Vite.
-- `npm run lint`: valida TypeScript do frontend.
-- `npm run build`: gera o build do GitHub Pages.
-- `npm run deno:check`: valida a Edge Function.
-- `npm run supabase:link:project`: linka a CLI ao projeto Supabase oficial.
-- `npm run supabase:db:push`: aplica migrations pendentes.
-- `npm run supabase:functions:deploy`: publica `sync-nexti`.
+- `npm run dev`: abre somente o frontend Vite.
+- `npm run dev:server`: sobe o backend Node localmente.
+- `npm run lint`: valida TypeScript do frontend e backend.
+- `npm run test`: roda os testes de regra de negocio.
+- `npm run build`: gera `dist/` do frontend e `dist-server/` do backend.
+- `npm start`: inicia o backend compilado, servindo tambem o frontend de `dist/`.
 
 ## Segredos
-- Nunca commite `.env`, PAT do GitHub, `SUPABASE_ACCESS_TOKEN`, `SUPABASE_SERVICE_ROLE_KEY` ou credenciais Nexti.
-- Em maquinas temporarias, prefira login interativo: `npm run supabase:login` e autenticacao GitHub pelo navegador.
-- Se precisar usar PAT em terminal, exporte somente na sessao atual e apague o terminal depois.
+- Nunca commite `.env`, `.env.hostinger`, credenciais Nexti, senha do PostgreSQL, PAT do GitHub ou chaves SSH.
+- Use `.env.example` e `.env.hostinger.example` apenas como modelo.
+- As credenciais Nexti devem existir somente no ambiente do backend no VPS.

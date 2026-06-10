@@ -1,11 +1,13 @@
 .DS_Store
 node_modules/
 dist/
+dist-server/
 .vite/
 *.tsbuildinfo
 .env
 .env.*
 !.env.example
+!.env.hostinger.example
 vite.config.js
 vite.config.d.ts
 
@@ -14,6 +16,3 @@ prompt controle de atestados
 prompt atestado.txt
 .codex
 
-# Supabase local runtime
-supabase/.branches/
-supabase/.temp/

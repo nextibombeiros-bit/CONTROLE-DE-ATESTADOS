@@ -1,0 +1,70 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: controle_atestados
+      POSTGRES_USER: controle
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?configure POSTGRES_PASSWORD no .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./server/sql/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U controle -d controle_atestados"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://controle:${POSTGRES_PASSWORD}@db:5432/controle_atestados
+      APP_PUBLIC_ORIGIN: ${APP_PUBLIC_ORIGIN:-}
+      RUN_MIGRATIONS: "true"
+      NEXTI_CLIENT_ID: ${NEXTI_CLIENT_ID:?configure NEXTI_CLIENT_ID no .env}
+      NEXTI_CLIENT_SECRET: ${NEXTI_CLIENT_SECRET:?configure NEXTI_CLIENT_SECRET no .env}
+      NEXTI_API_BASE_URL: ${NEXTI_API_BASE_URL:-https://api.nexti.com}
+      NEXTI_TOKEN_URL: ${NEXTI_TOKEN_URL:-https://api.nexti.com/security/oauth/token}
+      NEXTI_AUTO_SYNC_ENABLED: ${NEXTI_AUTO_SYNC_ENABLED:-true}
+      NEXTI_SYNC_POLL_SECONDS: ${NEXTI_SYNC_POLL_SECONDS:-60}
+      NEXTI_SYNC_INITIAL_LOOKBACK_DAYS: ${NEXTI_SYNC_INITIAL_LOOKBACK_DAYS:-365}
+      NEXTI_SYNC_OVERLAP_MINUTES: ${NEXTI_SYNC_OVERLAP_MINUTES:-15}
+      NEXTI_SYNC_MIN_INTERVAL_SECONDS: ${NEXTI_SYNC_MIN_INTERVAL_SECONDS:-60}
+      NEXTI_MEDICAL_ABSENCE_SITUATION_IDS: ${NEXTI_MEDICAL_ABSENCE_SITUATION_IDS:-}
+      NEXTI_MEDICAL_ABSENCE_SITUATION_EXTERNAL_IDS: ${NEXTI_MEDICAL_ABSENCE_SITUATION_EXTERNAL_IDS:-}
+      NEXTI_USER_ACCOUNT_LOOKBACK_START: ${NEXTI_USER_ACCOUNT_LOOKBACK_START:-01012000}
+      NEXTI_OPERATOR_NAME_OVERRIDES: ${NEXTI_OPERATOR_NAME_OVERRIDES:-}
+    expose:
+      - "3000"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.controle-atestados.rule: "Host(`${APP_DOMAIN}`)"
+      traefik.http.routers.controle-atestados.entrypoints: "websecure"
+      traefik.http.routers.controle-atestados.tls.certresolver: "letsencrypt"
+      traefik.http.services.controle-atestados.loadbalancer.server.port: "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["caddy"]
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?configure APP_DOMAIN no .env}
+    volumes:
+      - ./ops/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

@@ -13,7 +13,7 @@ import {
   ShieldAlert,
   Users,
 } from "lucide-react";
-import { supabase, hasSupabaseConfig } from "@/lib/supabase.ts";
+import { apiClient, hasApiConfig } from "@/lib/api.ts";
 import { buildControle, buildHistoricoAlertas, matchesDateFilter } from "@/lib/controle.ts";
 import { normalizeComparable } from "@/lib/afastamento.ts";
 import {
@@ -65,8 +65,6 @@ type OperadorSelecionado = {
   id: number;
   nome: string;
 };
-
-const PAGE_SIZE = 1000;
 
 const summaryConfig: Array<{ key: StatusKey; label: string; icon: typeof AlertTriangle }> = [
   { key: "alerta", label: "Alerta 16+", icon: ShieldAlert },
@@ -121,54 +119,50 @@ function App() {
   }, [periodMode]);
 
   async function loadData() {
-    if (!supabase) return;
     setLoading(true);
     setError("");
 
-    const [{ data: atestadosData, error: atestadosError }, { data: syncData, error: syncError }] = await Promise.all([
-      fetchAllAtestados(),
-      supabase.from("sincronizacoes").select("*").order("iniciado_em", { ascending: false }).limit(1).maybeSingle(),
-    ]);
-
-    if (atestadosError) {
-      setError(atestadosError.message);
-    } else if (syncError) {
-      setError(syncError.message);
-    } else {
-      const latestSync = (syncData as Sincronizacao | null) ?? null;
-      setAtestados((atestadosData ?? []) as Atestado[]);
+    try {
+      const [atestadosData, latestSync] = await Promise.all([apiClient.fetchAtestados(), apiClient.fetchLatestSync()]);
+      setAtestados(atestadosData);
       setSyncLog(latestSync);
       if (latestSync?.status === "erro" && latestSync.erro) {
         setError(`Falha na ultima sincronizacao: ${latestSync.erro}`);
       }
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Falha ao carregar dados");
     }
 
     setLoading(false);
   }
 
   async function syncNexti() {
-    if (!supabase || syncing) return;
+    if (syncing) return;
     setSyncing(true);
     setError("");
 
-    const { error: syncError } = await supabase.functions.invoke("sync-nexti", {
-      body: {
-        automatic: false,
-      },
-    });
-
-    if (syncError) {
-      setError(syncError.message);
-    } else {
+    try {
+      await apiClient.syncNexti();
       await loadData();
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : "Falha ao sincronizar Nexti");
     }
 
     setSyncing(false);
   }
 
   useEffect(() => {
-    if (!supabase) return;
     void loadData();
+  }, []);
+
+  useEffect(() => {
+    const events = new EventSource(apiClient.eventsUrl());
+    events.addEventListener("sync", () => {
+      void loadData();
+    });
+    events.onerror = () => undefined;
+
+    return () => events.close();
   }, []);
 
   const controle = useMemo(
@@ -392,13 +386,13 @@ function App() {
     topScrollDragRef.current = null;
   };
 
-  if (!hasSupabaseConfig) {
+  if (!hasApiConfig) {
     return (
       <main className="auth-layout">
         <section className="auth-panel">
           <ShieldAlert size={32} />
           <h1>Controle de Atestados</h1>
-          <p>Configure `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` no ambiente do frontend.</p>
+          <p>Configure a URL da API do Controle de Atestados.</p>
         </section>
       </main>
     );
@@ -1341,76 +1335,6 @@ function downloadCsv(filename: string, headers: string[], rows: string[][]) {
 
 function slugify(value: string): string {
   return normalizeComparable(value).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "relatorio";
-}
-
-async function fetchAllAtestados(): Promise<{ data: Atestado[] | null; error: Error | null }> {
-  if (!supabase) {
-    return { data: null, error: new Error("Supabase nao configurado") };
-  }
-
-  const rows: Atestado[] = [];
-  let from = 0;
-
-  while (true) {
-    const { data, error } = await supabase
-      .from("atestados")
-      .select(`
-        id,
-        id_nexti,
-        person_id_nexti,
-        matricula,
-        data_inicio,
-        data_fim,
-        dias,
-        data_lancamento,
-        lancado_por,
-        cid,
-        observacao,
-        tipo_ausencia_id,
-        tipo_ausencia_external_id,
-        tipo_ausencia_nome,
-        eh_atestado_medico,
-        removido,
-        lancado_por_id,
-        lancado_por_nome,
-        medico,
-        colaboradores!inner (
-          id,
-          person_id_nexti,
-          matricula,
-          nome,
-          cargo,
-          posto,
-          empresa,
-          situacao,
-          ultima_atualizacao,
-          ativo,
-          data_desligamento,
-          user_account_id_nexti
-        )
-      `)
-      .eq("removido", false)
-      .eq("eh_atestado_medico", true)
-      .eq("colaboradores.ativo", true)
-      .is("colaboradores.data_desligamento", null)
-      .order("data_inicio", { ascending: false })
-      .range(from, from + PAGE_SIZE - 1);
-
-    if (error) {
-      return { data: null, error: new Error(error.message) };
-    }
-
-    const chunk = (data ?? []) as unknown as Atestado[];
-    rows.push(...chunk);
-
-    if (chunk.length < PAGE_SIZE) {
-      break;
-    }
-
-    from += PAGE_SIZE;
-  }
-
-  return { data: rows, error: null };
 }
 
 function MonthlyBarsChart({ data, compact = false }: { data: MonthlyPoint[]; compact?: boolean }) {

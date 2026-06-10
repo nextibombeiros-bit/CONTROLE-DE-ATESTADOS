@@ -1,6 +1,4 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4";
-
-type SupabaseAdmin = ReturnType<typeof createClient<any, "public", any>>;
+import type { CompatDbClient } from "./pg-compat.js";
 
 type NextiAbsence = {
   id?: number;
@@ -126,7 +124,7 @@ type SyncWindow = {
 type RecentSync = {
   finishedAt: Date;
   nextAllowedAt: Date;
-  cooldownMinutes: number;
+  cooldownSeconds: number;
 };
 
 type WriteStats = {
@@ -138,15 +136,9 @@ type WriteStats = {
 
 type LookupValue = string | number;
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-sync-source",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RUNNING_SYNC_TIMEOUT_MINUTES = 20;
-const DEFAULT_SYNC_MIN_INTERVAL_MINUTES = 60;
+const DEFAULT_SYNC_MIN_INTERVAL_SECONDS = 60;
 const ATESTADO_NAME_PATTERN = /atestad/;
 const NON_ATESTADO_NAME_PATTERN =
   /(ferias|falta|folga|abono|demiss|compens|dsr|matern|amament|nascimento|filho|patern|casament|luto|doac|comparec|eleitoral|adocao|aleitamento)/;
@@ -197,42 +189,50 @@ const ATESTADO_COMPARE_COLUMNS = [
 
 const TIMESTAMP_COMPARE_COLUMNS = new Set(["ultima_atualizacao", "data_lancamento"]);
 
-Deno.serve(async (request) => {
-  if (request.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
-  }
+export type SyncRequestBody = {
+  automatic?: boolean;
+  startLastUpdate?: string;
+  finishLastUpdate?: string;
+  pageSize?: number;
+};
 
-  if (request.method !== "POST") {
-    return json({ error: "Metodo nao permitido" }, 405);
-  }
+export type SyncResult = {
+  automatic?: boolean;
+  imported?: number;
+  updated?: number;
+  skippedByFilter?: number;
+  absencesProcessed?: number;
+  skipped?: boolean;
+  reason?: string;
+  latestSyncAt?: string;
+  nextAllowedAt?: string;
+  error?: string;
+};
 
-  const supabaseUrl = requireEnv("SUPABASE_URL");
-  const serviceRoleKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+export async function runNextiSync(
+  admin: CompatDbClient,
+  body: SyncRequestBody = {},
+  options: { source?: string } = {},
+): Promise<{ status: number; payload: SyncResult }> {
   const nextiClientId = requireEnv("NEXTI_CLIENT_ID");
   const nextiClientSecret = requireEnv("NEXTI_CLIENT_SECRET");
-  const nextiBaseUrl = Deno.env.get("NEXTI_API_BASE_URL") ?? "https://api.nexti.com";
-  const nextiTokenUrl = Deno.env.get("NEXTI_TOKEN_URL") ?? "https://api.nexti.com/security/oauth/token";
-  const pageSize = clampNumber(await readPageSize(request), 10, 1000, 200);
-
-  const admin = createClient(supabaseUrl, serviceRoleKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-
-  const body = await safeJson(request);
+  const nextiBaseUrl = env("NEXTI_API_BASE_URL") ?? "https://api.nexti.com";
+  const nextiTokenUrl = env("NEXTI_TOKEN_URL") ?? "https://api.nexti.com/security/oauth/token";
+  const pageSize = clampNumber(body.pageSize ?? null, 10, 1000, 200);
   const now = new Date();
 
   if (await hasRunningSync(admin, now)) {
-    return json({ skipped: true, reason: "Sincronizacao ja em execucao" }, 202);
+    return { status: 202, payload: { skipped: true, reason: "Sincronizacao ja em execucao" } };
   }
 
   const recentSync = await findRecentSuccessfulSync(admin, now);
   if (recentSync) {
-    return json({
+    return { status: 202, payload: {
       skipped: true,
-      reason: `Ultima sincronizacao concluida ha menos de ${recentSync.cooldownMinutes} minutos`,
+      reason: `Ultima sincronizacao concluida ha menos de ${recentSync.cooldownSeconds} segundos`,
       latestSyncAt: recentSync.finishedAt.toISOString(),
       nextAllowedAt: recentSync.nextAllowedAt.toISOString(),
-    }, 202);
+    } };
   }
 
   const syncWindow = await resolveSyncWindow(admin, body, now);
@@ -246,14 +246,14 @@ Deno.serve(async (request) => {
       periodo_fim: syncWindow.finish.toISOString(),
       detalhes: {
         automatic: syncWindow.automatic,
-        source: request.headers.get("x-sync-source") ?? "http",
+        source: options.source ?? "http",
       },
     })
     .select("id")
     .single();
 
   if (logError) {
-    return json({ error: logError.message }, 500);
+    return { status: 500, payload: { error: logError.message } };
   }
 
   try {
@@ -297,7 +297,7 @@ Deno.serve(async (request) => {
         quantidade_atualizada: updated,
         detalhes: {
           automatic: syncWindow.automatic,
-          source: request.headers.get("x-sync-source") ?? "http",
+          source: options.source ?? "http",
           skippedByFilter,
           absencesProcessed: absences.length,
           absencesWritten: absenceWriteStats.written,
@@ -314,13 +314,13 @@ Deno.serve(async (request) => {
       })
       .eq("id", log.id);
 
-    return json({
+    return { status: 200, payload: {
       automatic: syncWindow.automatic,
       imported,
       updated,
       skippedByFilter,
       absencesProcessed: absences.length,
-    });
+    } };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Erro desconhecido";
     await admin
@@ -332,34 +332,18 @@ Deno.serve(async (request) => {
       })
       .eq("id", log.id);
 
-    return json({ error: message }, 500);
+    return { status: 500, payload: { error: message } };
   }
-});
-
-function json(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
 }
 
 function requireEnv(name: string): string {
-  const value = Deno.env.get(name);
+  const value = env(name);
   if (!value) throw new Error(`Variavel ${name} nao configurada`);
   return value;
 }
 
-async function safeJson(request: Request): Promise<Record<string, unknown>> {
-  try {
-    return (await request.json()) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
-}
-
-async function readPageSize(request: Request): Promise<number | null> {
-  const body = await safeJson(request.clone());
-  return typeof body.pageSize === "number" ? body.pageSize : null;
+function env(name: string): string | undefined {
+  return process.env[name];
 }
 
 function clampNumber(value: number | null, min: number, max: number, fallback: number): number {
@@ -368,10 +352,17 @@ function clampNumber(value: number | null, min: number, max: number, fallback: n
 }
 
 function readIntEnv(name: string, fallback: number): number {
-  const raw = Deno.env.get(name);
+  const raw = env(name);
   if (!raw) return fallback;
   const value = Number(raw);
   return Number.isFinite(value) ? Math.floor(value) : fallback;
+}
+
+function readOptionalIntEnv(name: string): number | null {
+  const raw = env(name);
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.floor(value) : null;
 }
 
 function parseInputDate(value: unknown): Date | null {
@@ -381,7 +372,7 @@ function parseInputDate(value: unknown): Date | null {
 }
 
 async function resolveSyncWindow(
-  admin: SupabaseAdmin,
+  admin: CompatDbClient,
   body: Record<string, unknown>,
   now: Date,
 ): Promise<SyncWindow> {
@@ -425,9 +416,16 @@ async function resolveSyncWindow(
   };
 }
 
-async function findRecentSuccessfulSync(admin: SupabaseAdmin, now: Date): Promise<RecentSync | null> {
-  const cooldownMinutes = Math.max(0, readIntEnv("NEXTI_SYNC_MIN_INTERVAL_MINUTES", DEFAULT_SYNC_MIN_INTERVAL_MINUTES));
-  if (cooldownMinutes === 0) return null;
+async function findRecentSuccessfulSync(admin: CompatDbClient, now: Date): Promise<RecentSync | null> {
+  const minuteCooldown = readOptionalIntEnv("NEXTI_SYNC_MIN_INTERVAL_MINUTES");
+  const cooldownSeconds = Math.max(
+    0,
+    readIntEnv(
+      "NEXTI_SYNC_MIN_INTERVAL_SECONDS",
+      minuteCooldown === null ? DEFAULT_SYNC_MIN_INTERVAL_SECONDS : minuteCooldown * 60,
+    ),
+  );
+  if (cooldownSeconds === 0) return null;
 
   const { data, error } = await admin
     .from("sincronizacoes")
@@ -444,15 +442,15 @@ async function findRecentSuccessfulSync(admin: SupabaseAdmin, now: Date): Promis
   const finishedAt = parseInputDate(data?.finalizado_em ?? data?.iniciado_em ?? null);
   if (!finishedAt) return null;
 
-  const nextAllowedAt = new Date(finishedAt.getTime() + cooldownMinutes * 60 * 1000);
+  const nextAllowedAt = new Date(finishedAt.getTime() + cooldownSeconds * 1000);
   if (now < nextAllowedAt) {
-    return { finishedAt, nextAllowedAt, cooldownMinutes };
+    return { finishedAt, nextAllowedAt, cooldownSeconds };
   }
 
   return null;
 }
 
-async function hasRunningSync(admin: SupabaseAdmin, now: Date): Promise<boolean> {
+async function hasRunningSync(admin: CompatDbClient, now: Date): Promise<boolean> {
   const startedAfter = new Date(now.getTime() - RUNNING_SYNC_TIMEOUT_MINUTES * 60 * 1000).toISOString();
   const { data, error } = await admin
     .from("sincronizacoes")
@@ -543,7 +541,7 @@ async function getNextiToken(tokenUrl: string, clientId: string, clientSecret: s
     throw new Error(`Falha ao autenticar na Nexti: ${response.status}`);
   }
 
-  const payload = await response.json();
+  const payload = await response.json() as { access_token?: string };
   if (!payload.access_token) {
     throw new Error("Resposta de token da Nexti sem access_token");
   }
@@ -581,7 +579,7 @@ async function fetchNextiReadOnly(
     throw new Error(`Nexti ${path} retornou ${response.status}: ${text.slice(0, 240)}`);
   }
 
-  return await response.json();
+  return await response.json() as Record<string, unknown> | unknown[];
 }
 
 function isNextiNoDataResponse(path: string, status: number, payload: string): boolean {
@@ -629,7 +627,7 @@ function readTotalPages(payload: Record<string, unknown> | unknown[]): number {
 
 function readMedicalFilters(): MedicalFilterConfig {
   const ids = new Set(
-    (Deno.env.get("NEXTI_MEDICAL_ABSENCE_SITUATION_IDS") ?? "")
+    (env("NEXTI_MEDICAL_ABSENCE_SITUATION_IDS") ?? "")
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean)
@@ -638,7 +636,7 @@ function readMedicalFilters(): MedicalFilterConfig {
   );
 
   const externalIds = new Set(
-    (Deno.env.get("NEXTI_MEDICAL_ABSENCE_SITUATION_EXTERNAL_IDS") ?? "")
+    (env("NEXTI_MEDICAL_ABSENCE_SITUATION_EXTERNAL_IDS") ?? "")
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean),
@@ -806,7 +804,7 @@ async function fetchMedicalAbsences(
   };
 }
 
-async function fetchTrackedPersonIds(admin: SupabaseAdmin): Promise<Set<number>> {
+async function fetchTrackedPersonIds(admin: CompatDbClient): Promise<Set<number>> {
   const ids = new Set<number>();
   const pageSize = 1000;
   let from = 0;
@@ -954,7 +952,7 @@ async function fetchUserAccounts(
   now: Date,
 ): Promise<Map<number, NextiUserAccount>> {
   const userMap = new Map<number, NextiUserAccount>();
-  const startDate = Deno.env.get("NEXTI_USER_ACCOUNT_LOOKBACK_START") ?? "01012000";
+  const startDate = env("NEXTI_USER_ACCOUNT_LOOKBACK_START") ?? "01012000";
   const finishDate = formatNextiSimpleDate(now);
 
   try {
@@ -989,7 +987,7 @@ function collectOperatorIds(absences: NextiAbsence[]): Set<number> {
   return ids;
 }
 
-async function fetchUnresolvedOperatorIds(admin: SupabaseAdmin): Promise<Set<number>> {
+async function fetchUnresolvedOperatorIds(admin: CompatDbClient): Promise<Set<number>> {
   const ids = new Set<number>();
   const pageSize = 1000;
   let from = 0;
@@ -1020,7 +1018,7 @@ async function fetchUnresolvedOperatorIds(admin: SupabaseAdmin): Promise<Set<num
 }
 
 async function resolveOperatorNames(
-  admin: SupabaseAdmin,
+  admin: CompatDbClient,
   operatorIds: Set<number>,
   userMap: Map<number, NextiUserAccount>,
   personMap: Map<number, NextiPerson>,
@@ -1077,7 +1075,7 @@ async function resolveOperatorNames(
 }
 
 function readOperatorNameOverrides(): Map<number, string> {
-  const raw = Deno.env.get("NEXTI_OPERATOR_NAME_OVERRIDES") ?? "";
+  const raw = env("NEXTI_OPERATOR_NAME_OVERRIDES") ?? "";
   const map = new Map<number, string>();
 
   for (const entry of raw.split(";")) {
@@ -1092,7 +1090,7 @@ function readOperatorNameOverrides(): Map<number, string> {
 }
 
 async function selectChangedRows(
-  admin: SupabaseAdmin,
+  admin: CompatDbClient,
   table: "atestados" | "colaboradores",
   keyColumn: string,
   rows: Array<Record<string, unknown>>,
@@ -1183,7 +1181,7 @@ function isLookupValue(value: unknown): value is LookupValue {
 }
 
 async function upsertPersons(
-  admin: SupabaseAdmin,
+  admin: CompatDbClient,
   absences: NextiAbsence[],
   personMap: Map<number, NextiPerson>,
   references: ReferenceData,
@@ -1250,7 +1248,7 @@ async function upsertPersons(
 }
 
 async function upsertAbsences(
-  admin: SupabaseAdmin,
+  admin: CompatDbClient,
   absences: NextiAbsence[],
   personMap: Map<number, NextiPerson>,
   operatorNames: Map<number, string>,
@@ -1309,7 +1307,7 @@ async function upsertAbsences(
   };
 }
 
-async function refreshExistingAbsenceMetadata(admin: SupabaseAdmin, situationIndex: SituationIndex) {
+async function refreshExistingAbsenceMetadata(admin: CompatDbClient, situationIndex: SituationIndex) {
   for (const situation of situationIndex.all) {
     const patch = {
       tipo_ausencia_nome: situation.name ?? null,
@@ -1333,7 +1331,7 @@ async function refreshExistingAbsenceMetadata(admin: SupabaseAdmin, situationInd
   }
 }
 
-async function refreshExistingUserNames(admin: SupabaseAdmin, operatorNames: Map<number, string>) {
+async function refreshExistingUserNames(admin: CompatDbClient, operatorNames: Map<number, string>) {
   for (const [userId, userName] of operatorNames.entries()) {
     const patch = {
       lancado_por: userName,
@@ -1344,7 +1342,7 @@ async function refreshExistingUserNames(admin: SupabaseAdmin, operatorNames: Map
   }
 }
 
-async function fetchExistingAbsenceIds(admin: SupabaseAdmin, ids: number[]): Promise<Set<number>> {
+async function fetchExistingAbsenceIds(admin: CompatDbClient, ids: number[]): Promise<Set<number>> {
   const existing = new Set<number>();
 
   for (const chunk of chunkArray(ids, 500)) {
