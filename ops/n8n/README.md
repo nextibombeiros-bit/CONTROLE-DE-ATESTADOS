@@ -69,7 +69,7 @@ Fluxo recomendado:
 
 Codigo sugerido para o node `Code - Validar segredo`:
 
-O Docker Compose ja define `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` e passa `CONTROLE_WEBHOOK_SECRET` para o n8n, permitindo esta validacao sem gravar o segredo dentro do workflow.
+O Docker Compose ja define `N8N_ENABLED_MODULES=data-table`, `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` e passa `CONTROLE_WEBHOOK_SECRET` para o n8n, permitindo Data Tables e esta validacao sem gravar o segredo dentro do workflow.
 
 ```js
 const expected = $env.CONTROLE_WEBHOOK_SECRET;
