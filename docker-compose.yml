@@ -39,6 +39,10 @@ services:
       NEXTI_MEDICAL_ABSENCE_SITUATION_EXTERNAL_IDS: ${NEXTI_MEDICAL_ABSENCE_SITUATION_EXTERNAL_IDS:-}
       NEXTI_USER_ACCOUNT_LOOKBACK_START: ${NEXTI_USER_ACCOUNT_LOOKBACK_START:-01012000}
       NEXTI_OPERATOR_NAME_OVERRIDES: ${NEXTI_OPERATOR_NAME_OVERRIDES:-}
+      NOTIFICATION_SITE_URL: ${NOTIFICATION_SITE_URL:-https://nextibombeiros-bit.github.io/CONTROLE-DE-ATESTADOS/}
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-}
+      N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-}
+      NOTIFICATION_MAX_ATTEMPTS: ${NOTIFICATION_MAX_ATTEMPTS:-5}
     expose:
       - "3000"
     labels:
@@ -47,6 +51,33 @@ services:
       traefik.http.routers.controle-atestados.entrypoints: "websecure"
       traefik.http.routers.controle-atestados.tls.certresolver: "letsencrypt"
       traefik.http.services.controle-atestados.loadbalancer.server.port: "3000"
+
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    environment:
+      TZ: America/Sao_Paulo
+      GENERIC_TIMEZONE: America/Sao_Paulo
+      N8N_HOST: ${APP_DOMAIN}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: https
+      N8N_PATH: /n8n/
+      N8N_EDITOR_BASE_URL: https://${APP_DOMAIN}/n8n/
+      WEBHOOK_URL: https://${APP_DOMAIN}/n8n/
+      N8N_PROXY_HOPS: 1
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?configure N8N_ENCRYPTION_KEY no .env}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      CONTROLE_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    expose:
+      - "5678"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.n8n.rule: "Host(`${APP_DOMAIN}`) && PathPrefix(`/n8n`)"
+      traefik.http.routers.n8n.entrypoints: "websecure"
+      traefik.http.routers.n8n.tls.certresolver: "letsencrypt"
+      traefik.http.services.n8n.loadbalancer.server.port: "5678"
 
   caddy:
     image: caddy:2-alpine
@@ -66,5 +97,6 @@ services:
 
 volumes:
   postgres_data:
+  n8n_data:
   caddy_data:
   caddy_config:

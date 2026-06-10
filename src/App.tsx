@@ -35,7 +35,7 @@ import type {
 } from "@/types.ts";
 
 type PeriodMode = "30" | "60" | "90" | "manual";
-type PageMode = "painel" | "relatorios";
+type PageMode = "painel" | "graficos";
 type ViewMode = "controle" | "historico";
 type LinhaSelecionavel = ControleLinha | HistoricoAlertaLinha;
 type StatusFilter = "todos" | StatusKey;
@@ -96,6 +96,7 @@ function App() {
   const [empresaFilter, setEmpresaFilter] = useState("todas");
   const [unidadeFilter, setUnidadeFilter] = useState("todas");
   const [sortOption, setSortOption] = useState<SortOption>("dias_desc");
+  const [advancedFiltersOpen, setAdvancedFiltersOpen] = useState(false);
   const [atestados, setAtestados] = useState<Atestado[]>([]);
   const [syncLog, setSyncLog] = useState<Sincronizacao | null>(null);
   const [loading, setLoading] = useState(false);
@@ -238,6 +239,27 @@ function App() {
     };
   }, [linhasVisiveis]);
 
+  const acaoAgora = useMemo(
+    () =>
+      sortLinhas(
+        linhasContexto.filter((line) => line.status === "alerta" && line.afastamentoStatus === "pendente"),
+        "dias_desc",
+      ).slice(0, 6),
+    [linhasContexto],
+  );
+  const proximosDoLimite = useMemo(
+    () =>
+      sortLinhas(
+        linhasContexto.filter((line) => line.status === "proximo" || line.status === "atencao"),
+        "dias_desc",
+      ).slice(0, 6),
+    [linhasContexto],
+  );
+  const novosAtestados = useMemo(
+    () => sortAtestadosForDisplay(atestados.filter((item) => item.data_lancamento), "data_lancamento").slice(0, 8),
+    [atestados],
+  );
+
   const personIdsVisiveis = useMemo(() => new Set(linhasVisiveis.map((line) => line.personId)), [linhasVisiveis]);
 
   const atestadosVisiveis = useMemo(() => {
@@ -291,15 +313,15 @@ function App() {
       ? `lancados de ${periodLabel(startDate, endDate)}`
       : `do periodo ${periodLabel(startDate, endDate)}`;
 
-    if (pageMode === "relatorios") {
+    if (pageMode === "graficos") {
       return viewMode === "controle"
-        ? `Relatorios e graficos com base no controle atual ${filterLabel}`
-        : "Relatorios e graficos com base nos colaboradores ativos que ja atingiram 16 dias ou mais em uma janela de 60 dias";
+        ? `Graficos com base no controle atual ${filterLabel}`
+        : "Graficos com base nos colaboradores ativos que ja atingiram 16 dias ou mais em uma janela de 60 dias";
     }
 
     return viewMode === "controle"
-      ? `Painel atual ${filterLabel}`
-      : "Todos os colaboradores ativos que, em algum momento, ja atingiram 16 dias ou mais em uma janela de 60 dias";
+      ? "Painel diario para priorizar afastamentos, proximos limites e novos lancamentos"
+      : "Historico simples dos colaboradores ativos que ja chegaram a 16 dias em uma janela de 60 dias";
   }, [dateFilterMode, endDate, pageMode, startDate, viewMode]);
 
   useEffect(() => {
@@ -416,7 +438,7 @@ function App() {
                 setViewMode("controle");
               }}
             >
-              Controle atual
+              Painel
             </button>
             <button
               type="button"
@@ -426,14 +448,14 @@ function App() {
                 setViewMode("historico");
               }}
             >
-              Quem ja atingiu 16+ em 60 dias
+              Historico 16+
             </button>
             <button
               type="button"
-              className={pageMode === "relatorios" ? "active" : ""}
-              onClick={() => setPageMode("relatorios")}
+              className={pageMode === "graficos" ? "active" : ""}
+              onClick={() => setPageMode("graficos")}
             >
-              RELATORIOS
+              Graficos
             </button>
           </div>
         </div>
@@ -483,6 +505,41 @@ function App() {
                 }}
               />
             </label>
+          </>
+        ) : null}
+
+        <label className="field-inline">
+          <Building2 size={16} />
+          <select value={empresaFilter} onChange={(event) => setEmpresaFilter(event.target.value)}>
+            <option value="todas">Todas as empresas</option>
+            {empresaOptions.map((empresa) => (
+              <option key={empresa} value={empresa}>
+                {empresa}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="search-field">
+          <Search size={16} />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Buscar colaborador"
+          />
+        </label>
+
+        <button
+          className="icon-button secondary"
+          type="button"
+          onClick={() => setAdvancedFiltersOpen((value) => !value)}
+        >
+          <Filter size={16} />
+          Filtros avancados
+        </button>
+
+        {advancedFiltersOpen ? (
+          <div className="advanced-filters">
             <label className="field-inline">
               <CalendarDays size={16} />
               <select
@@ -497,171 +554,162 @@ function App() {
                 <option value="data_lancamento">Data de lancamento</option>
               </select>
             </label>
-          </>
+
+            <label className="field-inline">
+              <Filter size={16} />
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}>
+                <option value="todos">Todos os status</option>
+                <option value="alerta">So 16+</option>
+                <option value="proximo">So 12 a 15</option>
+                <option value="atencao">So 8 a 11</option>
+                <option value="ok">So OK</option>
+              </select>
+            </label>
+
+            <label className="field-inline">
+              <ShieldAlert size={16} />
+              <select
+                value={afastamentoFilter}
+                onChange={(event) => setAfastamentoFilter(event.target.value as AfastamentoFilter)}
+              >
+                <option value="todos">Todos os afastamentos</option>
+                <option value="ocultar_lancados">Ocultar ja afastados</option>
+                <option value="somente_lancados">So ja afastados</option>
+                <option value="somente_pendentes">So 16+ sem afastamento</option>
+              </select>
+            </label>
+
+            <label className="field-inline">
+              <BarChart3 size={16} />
+              <select value={unidadeFilter} onChange={(event) => setUnidadeFilter(event.target.value)}>
+                <option value="todas">Todas as unidades</option>
+                {unidadeOptions.map((unidade) => (
+                  <option key={unidade} value={unidade}>
+                    {unidade}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="field-inline">
+              <Users size={16} />
+              <select value={sortOption} onChange={(event) => setSortOption(event.target.value as SortOption)}>
+                {sortOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
         ) : null}
-
-        <label className="field-inline">
-          <Filter size={16} />
-          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}>
-            <option value="todos">Todos os status</option>
-            <option value="alerta">So 16+</option>
-            <option value="proximo">So 12 a 15</option>
-            <option value="atencao">So 8 a 11</option>
-            <option value="ok">So OK</option>
-          </select>
-        </label>
-
-        <label className="field-inline">
-          <ShieldAlert size={16} />
-          <select
-            value={afastamentoFilter}
-            onChange={(event) => setAfastamentoFilter(event.target.value as AfastamentoFilter)}
-          >
-            <option value="todos">Todos os afastamentos</option>
-            <option value="ocultar_lancados">Ocultar ja afastados</option>
-            <option value="somente_lancados">So ja afastados</option>
-            <option value="somente_pendentes">So 16+ sem afastamento</option>
-          </select>
-        </label>
-
-        <label className="field-inline">
-          <Building2 size={16} />
-          <select value={empresaFilter} onChange={(event) => setEmpresaFilter(event.target.value)}>
-            <option value="todas">Todas as empresas</option>
-            {empresaOptions.map((empresa) => (
-              <option key={empresa} value={empresa}>
-                {empresa}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="field-inline">
-          <BarChart3 size={16} />
-          <select value={unidadeFilter} onChange={(event) => setUnidadeFilter(event.target.value)}>
-            <option value="todas">Todas as unidades</option>
-            {unidadeOptions.map((unidade) => (
-              <option key={unidade} value={unidade}>
-                {unidade}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="field-inline">
-          <Users size={16} />
-          <select value={sortOption} onChange={(event) => setSortOption(event.target.value as SortOption)}>
-            {sortOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="search-field">
-          <Search size={16} />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Buscar matricula, nome, cargo, unidade ou empresa"
-          />
-        </label>
       </section>
 
       {error ? <div className="notice error">{error}</div> : null}
 
       {pageMode === "painel" ? (
         <>
-          {viewMode === "controle" ? (
-            <section className="summary-grid summary-grid-large">
-              <article className="summary-card">
-                <span>Total com atestado medico</span>
-                <strong>{controleTotals.colaboradores}</strong>
-                <small>{periodLabel(startDate, endDate)}</small>
-              </article>
-              {summaryConfig.slice(0, 3).map(({ key, label, icon: Icon }) => (
-                <article className={`summary-card ${key}`} key={key}>
-                  <span>{label}</span>
-                  <strong>{controleTotals[key]}</strong>
-                  <Icon size={20} />
-                </article>
-              ))}
-              <article className="summary-card pending">
-                <span>16+ sem afastamento</span>
-                <strong>{controleTotals.pendentes}</strong>
-                <small>Precisam de conferencia</small>
-              </article>
-              <article className="summary-card launched">
-                <span>Ja afastados no Nexti</span>
-                <strong>{controleTotals.lancados}</strong>
-                <small>Com INSS / processo identificado</small>
-              </article>
-            </section>
-          ) : (
-            <section className="summary-grid summary-grid-large">
-              <article className="summary-card alerta">
-                <span>Quem ja atingiu 16+ em 60 dias</span>
-                <strong>{historicoTotals.colaboradores}</strong>
-                <small>Historico completo dos ativos</small>
-              </article>
-              <article className="summary-card launched">
-                <span>Ja afastados no Nexti</span>
-                <strong>{historicoTotals.lancados}</strong>
-                <small>Com lancamento de afastamento identificado</small>
-              </article>
-              <article className="summary-card pending">
-                <span>Sem afastamento identificado</span>
-                <strong>{historicoTotals.pendentes}</strong>
-                <small>Atingiram 16+ e seguem sem marca clara</small>
-              </article>
-              <article className="summary-card">
-                <span>Maior pico em 60 dias</span>
-                <strong>{historicoTotals.maiorPico}</strong>
-                <small>Dias distintos dentro da janela critica</small>
-              </article>
-              <article className="summary-card">
-                <span>Empresas afetadas</span>
-                <strong>{historicoTotals.empresas}</strong>
-                <small>Dunamis, RB Facilities e Acaz</small>
-              </article>
-            </section>
-          )}
+          <section className="daily-grid">
+            <article className="focus-card danger">
+              <div className="focus-card-header">
+                <div>
+                  <p className="eyebrow">Acao agora</p>
+                  <h2>{viewMode === "controle" ? "16+ sem afastamento" : "Historico 16+"}</h2>
+                </div>
+                <strong>{viewMode === "controle" ? acaoAgora.length : historicoTotals.pendentes}</strong>
+              </div>
+              <div className="mini-list">
+                {(viewMode === "controle" ? acaoAgora : linhasVisiveis.slice(0, 6)).map((line) => (
+                  <button className="mini-row" type="button" key={line.personId} onClick={() => setSelected(line)}>
+                    <span>
+                      <strong>{line.colaborador}</strong>
+                      <small>{line.empresa} | {line.posto}</small>
+                    </span>
+                    <b>{line.totalDias} dias</b>
+                  </button>
+                ))}
+                {(viewMode === "controle" ? acaoAgora : linhasVisiveis).length === 0 ? (
+                  <p className="empty-mini">Nenhum caso critico com os filtros atuais.</p>
+                ) : null}
+              </div>
+            </article>
+
+            <article className="focus-card warning">
+              <div className="focus-card-header">
+                <div>
+                  <p className="eyebrow">Proximos do limite</p>
+                  <h2>8 a 15 dias</h2>
+                </div>
+                <strong>{proximosDoLimite.length}</strong>
+              </div>
+              <div className="mini-list">
+                {proximosDoLimite.map((line) => (
+                  <button className="mini-row" type="button" key={line.personId} onClick={() => setSelected(line)}>
+                    <span>
+                      <strong>{line.colaborador}</strong>
+                      <small>{statusLabels[line.status]} | {line.empresa}</small>
+                    </span>
+                    <b>{line.totalDias} dias</b>
+                  </button>
+                ))}
+                {proximosDoLimite.length === 0 ? <p className="empty-mini">Nenhum colaborador entre 8 e 15 dias.</p> : null}
+              </div>
+            </article>
+
+            <article className="focus-card">
+              <div className="focus-card-header">
+                <div>
+                  <p className="eyebrow">Novos atestados</p>
+                  <h2>Ultimos lancamentos</h2>
+                </div>
+                <strong>{novosAtestados.length}</strong>
+              </div>
+              <div className="mini-list">
+                {novosAtestados.map((item) => (
+                  <div className="mini-row static" key={item.id}>
+                    <span>
+                      <strong>{item.colaboradores?.nome ?? `Colaborador ${item.person_id_nexti}`}</strong>
+                      <small>{item.colaboradores?.empresa ?? "-"} | {formatDateBR(item.data_lancamento)}</small>
+                    </span>
+                    <b>{item.dias} dias</b>
+                  </div>
+                ))}
+                {novosAtestados.length === 0 ? <p className="empty-mini">Nenhum lancamento recente carregado.</p> : null}
+              </div>
+            </article>
+
+            <article className="focus-card sync-card">
+              <div className="focus-card-header">
+                <div>
+                  <p className="eyebrow">Ultima sincronizacao</p>
+                  <h2>{syncLog ? statusSyncLabel(syncLog.status) : "Sem registro"}</h2>
+                </div>
+                <RefreshCw size={22} className={syncing || loading ? "spin" : ""} />
+              </div>
+              <p className="sync-date">{syncLog ? formatDateTimeBR(syncLog.finalizado_em ?? syncLog.iniciado_em) : "-"}</p>
+              <div className="sync-actions">
+                <button className="icon-button secondary" type="button" onClick={() => void loadData()} disabled={loading || syncing}>
+                  <RefreshCw size={16} />
+                  Atualizar
+                </button>
+                <button className="icon-button secondary" type="button" onClick={() => void syncNexti()} disabled={loading || syncing}>
+                  <RefreshCw size={16} />
+                  {syncing ? "Sincronizando..." : "Sincronizar"}
+                </button>
+              </div>
+            </article>
+          </section>
 
           <section className="table-section">
             <div className="section-heading">
               <div>
-                <h2>
-                  {viewMode === "controle"
-                    ? dateFilterMode === "data_lancamento"
-                      ? "Controle por data de lancamento"
-                      : "Controle do periodo"
-                    : "Historico de quem ja atingiu 16 dias ou mais em qualquer janela de 60 dias"}
-                </h2>
+                <h2>{viewMode === "controle" ? "Lista de acompanhamento" : "Historico 16+ em 60 dias"}</h2>
                 <p>
                   {loading ? "Carregando dados..." : `${linhasVisiveis.length} colaboradores encontrados`}
                   {syncLog ? ` | Base atualizada em ${formatDateTimeBR(syncLog.finalizado_em ?? syncLog.iniciado_em)}` : ""}
                 </p>
               </div>
               <div className="section-actions">
-                <button
-                  className="icon-button secondary"
-                  type="button"
-                  onClick={() => void loadData()}
-                  disabled={loading || syncing}
-                >
-                  <RefreshCw size={16} />
-                  {loading ? "Atualizando..." : "Atualizar"}
-                </button>
-                <button
-                  className="icon-button secondary"
-                  type="button"
-                  onClick={() => void syncNexti()}
-                  disabled={loading || syncing}
-                >
-                  <RefreshCw size={16} />
-                  {syncing ? "Sincronizando..." : "Sincronizar Nexti"}
-                </button>
                 <button
                   className="icon-button secondary"
                   type="button"
@@ -687,20 +735,16 @@ function App() {
             ) : null}
 
             <div className="table-wrap" ref={tableWrapRef}>
-              <table ref={tableRef}>
+              <table className="clean-table" ref={tableRef}>
                 <thead>
                   <tr>
                     <th>Status</th>
-                    <th>Dias</th>
-                    <th>Matricula</th>
                     <th>Colaborador</th>
-                    <th>Empresa</th>
-                    <th>Cargo</th>
                     <th>Unidade / posto</th>
-                    <th>Primeiro</th>
+                    <th>Empresa</th>
+                    <th>Dias</th>
                     <th>Ultimo</th>
-                    <th>Ultimo lancamento</th>
-                    <th>Periodo</th>
+                    <th>Acao</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -709,29 +753,27 @@ function App() {
                       <td>
                         <span className={`status-pill ${line.status}`}>{statusLabels[line.status]}</span>
                       </td>
-                      <td className="days">{line.totalDias}</td>
-                      <td>{line.matricula}</td>
                       <td className="cell-wrap cell-colaborador">
-                        <button className="colaborador-link" type="button" onClick={() => setSelected(line)}>
-                          <span className="colaborador-copy">
-                            <span>{line.colaborador}</span>
-                            {line.afastamentoLancado ? <span className="colaborador-badge">Afastado</span> : null}
-                          </span>
-                          <Eye size={14} />
+                        <span className="colaborador-copy">
+                          <strong>{line.colaborador}</strong>
+                          <small>{line.matricula}</small>
+                          {line.afastamentoLancado ? <span className="colaborador-badge">Afastado</span> : null}
+                        </span>
+                      </td>
+                      <td className="cell-wrap cell-posto">{line.posto}</td>
+                      <td className="cell-wrap">{line.empresa}</td>
+                      <td className="days">{line.totalDias}</td>
+                      <td>{formatDateBR(line.ultimoAtestado)}</td>
+                      <td>
+                        <button className="table-action" type="button" onClick={() => setSelected(line)} aria-label="Abrir historico">
+                          <Eye size={16} />
                         </button>
                       </td>
-                      <td className="cell-wrap">{line.empresa}</td>
-                      <td className="cell-wrap">{line.cargo}</td>
-                      <td className="cell-wrap cell-posto">{line.posto}</td>
-                      <td>{formatDateBR(line.primeiroAtestado)}</td>
-                      <td>{formatDateBR(line.ultimoAtestado)}</td>
-                      <td>{formatDateBR(line.ultimoLancamento)}</td>
-                      <td>{line.periodo}</td>
                     </tr>
                   ))}
                   {!loading && linhasVisiveis.length === 0 ? (
                     <tr>
-                      <td colSpan={11} className="empty-state">
+                      <td colSpan={6} className="empty-state">
                         {viewMode === "controle"
                           ? "Nenhum atestado medico encontrado com os filtros atuais."
                           : "Nenhum colaborador ativo atingiu 16 dias em uma janela de 60 dias com os filtros atuais."}
@@ -781,7 +823,7 @@ function App() {
           <section className="table-section report-section">
             <div className="section-heading">
               <div>
-                <h2>Relatorios e graficos</h2>
+                <h2>Graficos</h2>
                 <p>
                   {viewMode === "controle"
                     ? `Base: controle atual de ${periodLabel(startDate, endDate)}`
@@ -1090,6 +1132,12 @@ function getOperadorInfo(item: Atestado): OperadorSelecionado | null {
     id: item.lancado_por_id,
     nome: formatLancadoPor(item),
   };
+}
+
+function statusSyncLabel(status: Sincronizacao["status"]): string {
+  if (status === "sucesso") return "Atualizada";
+  if (status === "em_execucao") return "Em execucao";
+  return "Com erro";
 }
 
 function uniqueOptions(values: Array<string | null | undefined>): string[] {

@@ -56,6 +56,19 @@ create table if not exists public.sincronizacoes (
   detalhes jsonb not null default '{}'::jsonb
 );
 
+create table if not exists public.notification_events (
+  id uuid primary key default gen_random_uuid(),
+  event_key text not null unique,
+  event_type text not null check (event_type in ('novo_atestado', 'mudanca_nivel_alerta')),
+  status text not null default 'pendente' check (status in ('pendente', 'enviado', 'erro')),
+  payload jsonb not null,
+  attempts integer not null default 0,
+  last_error text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  sent_at timestamptz
+);
+
 create index if not exists idx_colaboradores_ativo on public.colaboradores (ativo);
 create index if not exists idx_colaboradores_user_account_id_nexti on public.colaboradores (user_account_id_nexti);
 create index if not exists idx_atestados_periodo on public.atestados (data_inicio, data_fim);
@@ -67,6 +80,9 @@ create index if not exists idx_atestados_lancado_por_id
   on public.atestados (lancado_por_id)
   where lancado_por_id is not null;
 create index if not exists idx_sincronizacoes_inicio on public.sincronizacoes (iniciado_em desc);
+create index if not exists idx_notification_events_dispatch
+  on public.notification_events (status, created_at)
+  where status in ('pendente', 'erro');
 
 create or replace function public.set_atualizado_em()
 returns trigger
@@ -86,4 +102,9 @@ for each row execute function public.set_atualizado_em();
 drop trigger if exists trg_atestados_atualizado_em on public.atestados;
 create trigger trg_atestados_atualizado_em
 before update on public.atestados
+for each row execute function public.set_atualizado_em();
+
+drop trigger if exists trg_notification_events_atualizado_em on public.notification_events;
+create trigger trg_notification_events_atualizado_em
+before update on public.notification_events
 for each row execute function public.set_atualizado_em();

@@ -132,6 +132,8 @@ type WriteStats = {
   updated: number;
   skipped: number;
   written: number;
+  insertedKeys: LookupValue[];
+  updatedKeys: LookupValue[];
 };
 
 type LookupValue = string | number;
@@ -284,6 +286,10 @@ export async function runNextiSync(
 
     const personsWritten = await upsertPersons(admin, absences, personMap, references);
     const absenceWriteStats = await upsertAbsences(admin, absences, personMap, operatorNames, situationIndex);
+    const notificationStats = await enqueueAndDispatchNotificationEvents(admin, {
+      insertedAbsenceIds: absenceWriteStats.insertedKeys.map(Number).filter(Number.isFinite),
+      changedAbsenceIds: [...absenceWriteStats.insertedKeys, ...absenceWriteStats.updatedKeys].map(Number).filter(Number.isFinite),
+    });
 
     const imported = absenceWriteStats.inserted;
     const updated = absenceWriteStats.updated;
@@ -306,6 +312,9 @@ export async function runNextiSync(
           personsLoaded: personMap.size,
           userAccountsLoaded: userMap.size,
           operatorNamesResolved: operatorNames.size,
+          notificationsCreated: notificationStats.created,
+          notificationsSent: notificationStats.sent,
+          notificationsFailed: notificationStats.failed,
           medicalSituationsDetected: situationIndex.detectedMedicalIds.size +
             situationIndex.detectedMedicalExternalIds.size,
           maxLastUpdateSeen: maxLastUpdateSeen?.toISOString() ?? null,
@@ -1097,6 +1106,8 @@ async function selectChangedRows(
   compareColumns: string[],
 ): Promise<{ rows: Array<Record<string, unknown>> } & WriteStats> {
   const changedRows: Array<Record<string, unknown>> = [];
+  const insertedKeys: LookupValue[] = [];
+  const updatedKeys: LookupValue[] = [];
   let inserted = 0;
   let updated = 0;
   let skipped = 0;
@@ -1129,6 +1140,7 @@ async function selectChangedRows(
       if (!isLookupValue(key)) {
         changedRows.push(row);
         updated += 1;
+        updatedKeys.push(String(changedRows.length));
         continue;
       }
 
@@ -1136,19 +1148,21 @@ async function selectChangedRows(
       if (!existing) {
         changedRows.push(row);
         inserted += 1;
+        insertedKeys.push(key);
         continue;
       }
 
       if (hasChangedColumns(existing, row, compareColumns)) {
         changedRows.push(row);
         updated += 1;
+        updatedKeys.push(key);
       } else {
         skipped += 1;
       }
     }
   }
 
-  return { rows: changedRows, inserted, updated, skipped, written: changedRows.length };
+  return { rows: changedRows, inserted, updated, skipped, written: changedRows.length, insertedKeys, updatedKeys };
 }
 
 function hasChangedColumns(existing: Record<string, unknown>, next: Record<string, unknown>, columns: string[]): boolean {
@@ -1304,7 +1318,475 @@ async function upsertAbsences(
     updated: writeStats.updated,
     skipped: writeStats.skipped,
     written: writeStats.written,
+    insertedKeys: writeStats.insertedKeys,
+    updatedKeys: writeStats.updatedKeys,
   };
+}
+
+type NotificationStats = {
+  created: number;
+  sent: number;
+  failed: number;
+};
+
+type NotificationEventType = "novo_atestado" | "mudanca_nivel_alerta";
+
+type NotificationPayload = {
+  eventType: NotificationEventType;
+  eventKey: string;
+  company: string | null;
+  employee: {
+    personId: number;
+    name: string;
+    matricula: string | null;
+    cargo: string | null;
+    unidade: string | null;
+    empresa: string | null;
+  };
+  absence: {
+    idNexti: number | null;
+    startDate: string | null;
+    endDate: string | null;
+    days: number | null;
+    launchedAt: string | null;
+    launchedBy: string | null;
+    cid: string | null;
+    medico: string | null;
+    observacao: string | null;
+    tipo: string | null;
+  } | null;
+  alert: {
+    level: "atencao" | "proximo" | "alerta";
+    label: string;
+    previousLevel: "ok" | "atencao" | "proximo" | null;
+    previousLabel: string | null;
+    totalDias: number;
+    threshold: number;
+    windowStart: string;
+    windowEnd: string;
+  } | null;
+  siteUrl: string;
+  createdAt: string;
+};
+
+type NotificationAbsenceRow = {
+  id_nexti: number;
+  person_id_nexti: number;
+  matricula: string | null;
+  data_inicio: string;
+  data_fim: string;
+  dias: number;
+  data_lancamento: string | null;
+  lancado_por: string | null;
+  cid: string | null;
+  observacao: string | null;
+  tipo_ausencia_nome: string | null;
+  tipo_ausencia_id: number | null;
+  tipo_ausencia_external_id: string | null;
+  lancado_por_nome: string | null;
+  medico: string | null;
+  colaborador_nome: string;
+  colaborador_cargo: string | null;
+  colaborador_posto: string | null;
+  colaborador_empresa: string | null;
+};
+
+type CurrentAlert = {
+  personId: number;
+  totalDias: number;
+  windowStart: string;
+  windowEnd: string;
+  row: NotificationAbsenceRow;
+  levels: Array<{
+    level: "atencao" | "proximo" | "alerta";
+    label: string;
+    threshold: number;
+  }>;
+};
+
+const ALERT_LEVELS: CurrentAlert["levels"] = [
+  { level: "atencao", label: "ATENCAO", threshold: 8 },
+  { level: "proximo", label: "PROXIMO DO LIMITE", threshold: 12 },
+  { level: "alerta", label: "ALERTA AFASTAMENTO", threshold: 16 },
+];
+
+async function enqueueAndDispatchNotificationEvents(
+  admin: CompatDbClient,
+  input: { insertedAbsenceIds: number[]; changedAbsenceIds: number[] },
+): Promise<NotificationStats> {
+  if (env("NOTIFICATIONS_ENABLED") === "false") {
+    return { created: 0, sent: 0, failed: 0 };
+  }
+
+  const uniqueInsertedIds = uniqueNumbers(input.insertedAbsenceIds);
+  const uniqueChangedIds = uniqueNumbers(input.changedAbsenceIds);
+  const changedRows = await fetchNotificationAbsenceRows(admin, uniqueChangedIds);
+  const changedPersonIds = uniqueNumbers(changedRows.map((row) => row.person_id_nexti));
+  const alerts = await fetchCurrentAlerts(admin, changedPersonIds);
+  const alertsByPersonId = new Map(alerts.map((alert) => [alert.personId, alert]));
+  let created = 0;
+
+  if (uniqueInsertedIds.length > 0) {
+    const insertedRows = await fetchNotificationAbsenceRows(admin, uniqueInsertedIds);
+    for (const row of insertedRows) {
+      const alert = alertsByPersonId.get(row.person_id_nexti) ?? null;
+      const payload = buildNewAbsencePayload(row, alert);
+      created += await insertNotificationEvent(admin, payload.eventKey, payload.eventType, payload);
+    }
+  }
+
+  for (const alert of alerts) {
+    for (const level of alert.levels) {
+      const payload = buildAlertPayload(alert, level);
+      created += await insertNotificationEvent(admin, payload.eventKey, payload.eventType, payload);
+    }
+  }
+
+  const dispatch = await dispatchPendingNotificationEvents(admin);
+  return { created, sent: dispatch.sent, failed: dispatch.failed };
+}
+
+async function fetchNotificationAbsenceRows(admin: CompatDbClient, ids: number[]): Promise<NotificationAbsenceRow[]> {
+  if (ids.length === 0) return [];
+
+  const rows: NotificationAbsenceRow[] = [];
+  for (const chunk of chunkArray(ids, 500)) {
+    rows.push(
+      ...(await admin.query<NotificationAbsenceRow>(
+        `
+        select
+          a.id_nexti,
+          a.person_id_nexti,
+          a.matricula,
+          a.data_inicio,
+          a.data_fim,
+          a.dias,
+          a.data_lancamento,
+          a.lancado_por,
+          a.cid,
+          a.observacao,
+          a.tipo_ausencia_nome,
+          a.tipo_ausencia_id,
+          a.tipo_ausencia_external_id,
+          a.lancado_por_nome,
+          a.medico,
+          c.nome as colaborador_nome,
+          c.cargo as colaborador_cargo,
+          c.posto as colaborador_posto,
+          c.empresa as colaborador_empresa
+        from public.atestados a
+        inner join public.colaboradores c on c.person_id_nexti = a.person_id_nexti
+        where a.id_nexti in (${chunk.map((_, index) => `$${index + 1}`).join(", ")})
+          and a.removido = false
+          and a.eh_atestado_medico = true
+          and c.ativo = true
+          and c.data_desligamento is null
+        order by a.data_lancamento desc nulls last, a.id_nexti desc
+        `,
+        chunk,
+      )),
+    );
+  }
+
+  return rows;
+}
+
+async function fetchCurrentAlerts(admin: CompatDbClient, personIds: number[]): Promise<CurrentAlert[]> {
+  if (personIds.length === 0) return [];
+
+  const windowEnd = dateOnlyFromDate(new Date());
+  const windowStart = dateOnlyFromDate(new Date(Date.now() - 59 * DAY_MS));
+  const rows: NotificationAbsenceRow[] = [];
+
+  for (const chunk of chunkArray(personIds, 500)) {
+    rows.push(
+      ...(await admin.query<NotificationAbsenceRow>(
+        `
+        select
+          a.id_nexti,
+          a.person_id_nexti,
+          a.matricula,
+          a.data_inicio,
+          a.data_fim,
+          a.dias,
+          a.data_lancamento,
+          a.lancado_por,
+          a.cid,
+          a.observacao,
+          a.tipo_ausencia_nome,
+          a.tipo_ausencia_id,
+          a.tipo_ausencia_external_id,
+          a.lancado_por_nome,
+          a.medico,
+          c.nome as colaborador_nome,
+          c.cargo as colaborador_cargo,
+          c.posto as colaborador_posto,
+          c.empresa as colaborador_empresa
+        from public.atestados a
+        inner join public.colaboradores c on c.person_id_nexti = a.person_id_nexti
+        where a.person_id_nexti in (${chunk.map((_, index) => `$${index + 1}`).join(", ")})
+          and a.removido = false
+          and a.eh_atestado_medico = true
+          and c.ativo = true
+          and c.data_desligamento is null
+          and a.data_inicio <= $${chunk.length + 1}
+          and a.data_fim >= $${chunk.length + 2}
+        order by a.person_id_nexti, a.data_inicio desc
+        `,
+        [...chunk, windowEnd, windowStart],
+      )),
+    );
+  }
+
+  const grouped = new Map<number, NotificationAbsenceRow[]>();
+  for (const row of rows) {
+    const current = grouped.get(row.person_id_nexti) ?? [];
+    current.push(row);
+    grouped.set(row.person_id_nexti, current);
+  }
+
+  return Array.from(grouped.entries()).flatMap(([personId, personRows]) => {
+    const totalDias = countDistinctDaysInWindow(personRows, windowStart, windowEnd);
+    const levels = ALERT_LEVELS.filter((level) => totalDias >= level.threshold);
+    if (levels.length === 0) return [];
+
+    const latest = [...personRows].sort((left, right) =>
+      compareNullableStringsDesc(left.data_lancamento, right.data_lancamento) || right.id_nexti - left.id_nexti,
+    )[0];
+
+    return [{
+      personId,
+      totalDias,
+      windowStart,
+      windowEnd,
+      row: latest,
+      levels,
+    }];
+  });
+}
+
+function buildNewAbsencePayload(row: NotificationAbsenceRow, alert: CurrentAlert | null): NotificationPayload {
+  const highestLevel = alert?.levels.at(-1) ?? null;
+  const eventKey = `novo_atestado:${row.id_nexti}`;
+
+  return {
+    eventType: "novo_atestado",
+    eventKey,
+    company: row.colaborador_empresa,
+    employee: buildEmployeePayload(row),
+    absence: buildAbsencePayload(row),
+    alert: highestLevel && alert ? buildAlertInfo(alert, highestLevel) : null,
+    siteUrl: notificationSiteUrl(),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function buildAlertPayload(alert: CurrentAlert, level: CurrentAlert["levels"][number]): NotificationPayload {
+  const eventKey = `mudanca_nivel_alerta:${alert.personId}:${level.level}`;
+
+  return {
+    eventType: "mudanca_nivel_alerta",
+    eventKey,
+    company: alert.row.colaborador_empresa,
+    employee: buildEmployeePayload(alert.row),
+    absence: buildAbsencePayload(alert.row),
+    alert: buildAlertInfo(alert, level),
+    siteUrl: notificationSiteUrl(),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function buildEmployeePayload(row: NotificationAbsenceRow): NotificationPayload["employee"] {
+  return {
+    personId: row.person_id_nexti,
+    name: row.colaborador_nome,
+    matricula: row.matricula,
+    cargo: row.colaborador_cargo,
+    unidade: row.colaborador_posto,
+    empresa: row.colaborador_empresa,
+  };
+}
+
+function buildAbsencePayload(row: NotificationAbsenceRow): NonNullable<NotificationPayload["absence"]> {
+  return {
+    idNexti: row.id_nexti,
+    startDate: dateOnly(row.data_inicio),
+    endDate: dateOnly(row.data_fim),
+    days: row.dias,
+    launchedAt: row.data_lancamento,
+    launchedBy: row.lancado_por_nome ?? row.lancado_por,
+    cid: row.cid,
+    medico: row.medico,
+    observacao: row.observacao,
+    tipo: row.tipo_ausencia_nome ?? row.tipo_ausencia_external_id ?? (row.tipo_ausencia_id ? String(row.tipo_ausencia_id) : null),
+  };
+}
+
+function buildAlertInfo(
+  alert: CurrentAlert,
+  level: CurrentAlert["levels"][number],
+): NonNullable<NotificationPayload["alert"]> {
+  const previousLevel = previousAlertLevel(level.level);
+
+  return {
+    level: level.level,
+    label: level.label,
+    previousLevel: previousLevel?.level ?? null,
+    previousLabel: previousLevel?.label ?? null,
+    totalDias: alert.totalDias,
+    threshold: level.threshold,
+    windowStart: alert.windowStart,
+    windowEnd: alert.windowEnd,
+  };
+}
+
+function previousAlertLevel(level: CurrentAlert["levels"][number]["level"]): { level: "ok" | "atencao" | "proximo"; label: string } | null {
+  if (level === "atencao") return { level: "ok", label: "OK" };
+  if (level === "proximo") return { level: "atencao", label: "ATENCAO" };
+  if (level === "alerta") return { level: "proximo", label: "PROXIMO DO LIMITE" };
+  return null;
+}
+
+async function insertNotificationEvent(
+  admin: CompatDbClient,
+  eventKey: string,
+  eventType: NotificationEventType,
+  payload: NotificationPayload,
+): Promise<number> {
+  const result = await admin.query<{ id: string }>(
+    `
+    insert into public.notification_events (event_key, event_type, payload)
+    values ($1, $2, $3::jsonb)
+    on conflict (event_key) do nothing
+    returning id
+    `,
+    [eventKey, eventType, JSON.stringify(payload)],
+  );
+
+  return result.length;
+}
+
+async function dispatchPendingNotificationEvents(admin: CompatDbClient): Promise<{ sent: number; failed: number }> {
+  const webhookUrl = env("N8N_WEBHOOK_URL");
+  if (!webhookUrl) return { sent: 0, failed: 0 };
+
+  const maxAttempts = Math.max(1, readIntEnv("NOTIFICATION_MAX_ATTEMPTS", 5));
+  const events = await admin.query<{
+    id: string;
+    event_key: string;
+    event_type: NotificationEventType;
+    payload: NotificationPayload;
+    attempts: number;
+  }>(
+    `
+    select id, event_key, event_type, payload, attempts
+    from public.notification_events
+    where status in ('pendente', 'erro')
+      and attempts < $1
+    order by created_at asc
+    limit 20
+    `,
+    [maxAttempts],
+  );
+
+  let sent = 0;
+  let failed = 0;
+
+  for (const event of events) {
+    try {
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Controle-Secret": env("N8N_WEBHOOK_SECRET") ?? "",
+        },
+        body: JSON.stringify(event.payload),
+      });
+
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(`n8n retornou ${response.status}: ${message.slice(0, 240)}`);
+      }
+
+      await admin.query(
+        `
+        update public.notification_events
+        set status = 'enviado',
+            attempts = attempts + 1,
+            sent_at = now(),
+            last_error = null
+        where id = $1
+        `,
+        [event.id],
+      );
+      sent += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await admin.query(
+        `
+        update public.notification_events
+        set status = 'erro',
+            attempts = attempts + 1,
+            last_error = $2
+        where id = $1
+        `,
+        [event.id, message],
+      );
+      failed += 1;
+    }
+  }
+
+  return { sent, failed };
+}
+
+function countDistinctDaysInWindow(rows: NotificationAbsenceRow[], windowStart: string, windowEnd: string): number {
+  const days = new Set<string>();
+
+  for (const row of rows) {
+    let cursor = maxDateOnly(dateOnly(row.data_inicio), windowStart);
+    const finish = minDateOnly(dateOnly(row.data_fim), windowEnd);
+
+    while (cursor <= finish) {
+      days.add(cursor);
+      cursor = addDays(cursor, 1);
+    }
+  }
+
+  return days.size;
+}
+
+function notificationSiteUrl(): string {
+  return env("NOTIFICATION_SITE_URL") ?? "https://nextibombeiros-bit.github.io/CONTROLE-DE-ATESTADOS/";
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  return Array.from(new Set(values.filter((value) => Number.isFinite(value))));
+}
+
+function dateOnly(value: string): string {
+  return value.slice(0, 10);
+}
+
+function dateOnlyFromDate(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
+function maxDateOnly(left: string, right: string): string {
+  return left > right ? left : right;
+}
+
+function minDateOnly(left: string, right: string): string {
+  return left < right ? left : right;
+}
+
+function addDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return dateOnlyFromDate(date);
+}
+
+function compareNullableStringsDesc(left: string | null | undefined, right: string | null | undefined): number {
+  return (right ?? "").localeCompare(left ?? "");
 }
 
 async function refreshExistingAbsenceMetadata(admin: CompatDbClient, situationIndex: SituationIndex) {
